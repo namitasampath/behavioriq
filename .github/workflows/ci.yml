@@ -1,0 +1,17 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install -r requirements.txt ruff
+      - run: ruff check biq tests --select E9,F63,F7,F82
+      - run: pytest -q tests
+      - name: smoke - simulate, stream, warehouse
+        run: |
+          BIQ_N_SESSIONS=300 python run_all.py --only simulate
+          python run_all.py --only stream
+          python -c "import biq.warehouse as w; w.build(); assert w.spot_check() == 10"

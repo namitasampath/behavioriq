@@ -1,0 +1,55 @@
+feature,psi,ks_pvalue,drifted,scenario
+event_count,0.005817834443997705,0.885866795515389,False,"control (no drift, new traffic)"
+n_product_view,0.007128299192775803,0.2128609463036492,False,"control (no drift, new traffic)"
+n_review_view,0.004575666911093289,0.6710116676167,False,"control (no drift, new traffic)"
+n_compare,0.006051900764294351,0.9999103855741842,False,"control (no drift, new traffic)"
+n_add_to_cart,0.004172011269296003,0.5313304614214238,False,"control (no drift, new traffic)"
+n_remove_from_cart,0.0011741697673364965,1.0,False,"control (no drift, new traffic)"
+n_checkout_start,0.0007454194290483932,0.986885875704646,False,"control (no drift, new traffic)"
+duration_s,0.0025077983622799832,0.4244269519479549,False,"control (no drift, new traffic)"
+is_mobile,0.00016290505763071425,0.9999999999649665,False,"control (no drift, new traffic)"
+event_count,0.008260608951389137,0.8397168836046984,False,mobile surge (80% mobile)
+n_product_view,0.0017289913046282855,0.9961723237364021,False,mobile surge (80% mobile)
+n_review_view,0.007665045417731711,0.6710116676167,False,mobile surge (80% mobile)
+n_compare,0.016063184327064228,0.7627034299171714,False,mobile surge (80% mobile)
+n_add_to_cart,0.005256220958731727,0.9079884245753969,False,mobile surge (80% mobile)
+n_remove_from_cart,0.00015039725934835473,1.0,False,mobile surge (80% mobile)
+n_checkout_start,0.0015462614356797242,0.9999998247459948,False,mobile surge (80% mobile)
+duration_s,0.007990760812948342,0.15708533270467684,False,mobile surge (80% mobile)
+is_mobile,0.652777064660088,3.55461812030481e-141,True,mobile surge (80% mobile)
+event_count,0.038927662150936994,1.903230284651115e-08,False,comparer surge (85% heavy comparers)
+n_product_view,0.010519275236186308,0.016479588122756697,False,comparer surge (85% heavy comparers)
+n_review_view,0.16719047476898316,1.0126451797550192e-26,False,comparer surge (85% heavy comparers)
+n_compare,0.30391670179151775,1.1596932183577192e-49,True,comparer surge (85% heavy comparers)
+n_add_to_cart,0.012153501219626498,0.9307097835482634,False,comparer surge (85% heavy comparers)
+n_remove_from_cart,0.004492080165362395,0.9999983388447118,False,comparer surge (85% heavy comparers)
+n_checkout_start,0.0015620568336741922,0.9999962783803706,False,comparer surge (85% heavy comparers)
+duration_s,0.19948212783550104,3.657398412459237e-32,False,comparer surge (85% heavy comparers)
+is_mobile,0.06147324244638877,3.048172896238737e-14,False,comparer surge (85% heavy comparers)
+event_count,0.01709685398763041,0.029703283749280426,False,deal-hunter influx (85% deal hunters)
+n_product_view,0.004878359559343894,0.72658471316436,False,deal-hunter influx (85% deal hunters)
+n_review_view,0.07899823422216509,1.480868220293791e-06,False,deal-hunter influx (85% deal hunters)
+n_compare,0.024136534878198137,0.46672609275481625,False,deal-hunter influx (85% deal hunters)
+n_add_to_cart,0.02262682015479191,0.18079888271634031,False,deal-hunter influx (85% deal hunters)
+n_remove_from_cart,0.00976357882307929,0.6149883078943889,False,deal-hunter influx (85% deal hunters)
+n_checkout_start,0.006784327573219338,0.2411939467651017,False,deal-hunter influx (85% deal hunters)
+duration_s,0.10262044184280746,1.2186074288767075e-12,False,deal-hunter influx (85% deal hunters)
+is_mobile,0.14618068030214562,3.080248781192938e-35,False,deal-hunter influx (85% deal hunters)
+event_count,0.011083421408324719,0.20308875277512703,False,slow sessions (dwell x3)
+n_product_view,0.008712017255924555,0.963470020674929,False,slow sessions (dwell x3)
+n_review_view,0.012522582182111884,0.9486468248135279,False,slow sessions (dwell x3)
+n_compare,0.0043847348687790205,0.9999709058842836,False,slow sessions (dwell x3)
+n_add_to_cart,0.002037480180747721,0.9993605183897558,False,slow sessions (dwell x3)
+n_remove_from_cart,0.0032427031304352785,0.993057610209928,False,slow sessions (dwell x3)
+n_checkout_start,3.963853850729597e-05,1.0,False,slow sessions (dwell x3)
+duration_s,1.0474375616372125,8.975637409945474e-181,True,slow sessions (dwell x3)
+is_mobile,5.474501331076633e-05,1.0,False,slow sessions (dwell x3)
+event_count,0.010802466712312329,0.16392347898784046,False,abandoner wave (85% abandoners)
+n_product_view,0.004373405803866456,0.8397168836046984,False,abandoner wave (85% abandoners)
+n_review_view,0.022412976246746503,0.3569913525216966,False,abandoner wave (85% abandoners)
+n_compare,0.020210302726789413,0.7803153091185838,False,abandoner wave (85% abandoners)
+n_add_to_cart,0.13746867264570803,7.235736646198074e-23,False,abandoner wave (85% abandoners)
+n_remove_from_cart,0.15323247728046177,5.999699992640819e-22,False,abandoner wave (85% abandoners)
+n_checkout_start,0.004972311976543187,0.9727873196408178,False,abandoner wave (85% abandoners)
+duration_s,0.008785646735293669,0.1243776666355148,False,abandoner wave (85% abandoners)
+is_mobile,0.00019971119850093708,0.9999999964442858,False,abandoner wave (85% abandoners)
