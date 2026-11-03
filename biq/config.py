@@ -60,3 +60,13 @@ N_SESSIONS = int(os.getenv("BIQ_N_SESSIONS", "6000"))
 # see requirements-evidently.txt - rather than being installed into this project's venv.
 EVIDENTLY_ENABLED = os.getenv("BIQ_EVIDENTLY", "") == "1"
 EVIDENTLY_PYTHON = os.getenv("BIQ_EVIDENTLY_PYTHON", str(ROOT / ".venv-evidently" / "Scripts" / "python.exe"))
+
+# Feature store online backend (Upgrade 4): FEATURE_STORE=redis switches FeatureStore's online
+# store from SQLite to Redis. Feast itself (the originally planned backend) is blocked in this
+# venv - feast 0.67.0 needs pandas<3 (this project pins pandas 3.1.0) and also downgrades
+# prometheus-client, which biq/ingest_api.py and biq/serve_api.py (Upgrade 3) depend on - so
+# redis-py is used directly behind the same FeatureStore interface instead. Unset (default
+# "sqlite") keeps the original SQLite online store; the Parquet offline store is unchanged either
+# way. See docs/PROGRESS.md ("Upgrade 4") for the dependency check that ruled Feast out.
+FEATURE_STORE_BACKEND = os.getenv("FEATURE_STORE", "sqlite")
+REDIS_URL = os.getenv("BIQ_REDIS_URL", "redis://localhost:6379/0")

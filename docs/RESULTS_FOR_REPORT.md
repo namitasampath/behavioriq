@@ -49,6 +49,33 @@ time-based 70/15/15 split). Every number below is reproducible; full tables are 
 - The text baseline is TF-IDF + SVD unless `sentence-transformers` is installed (it then uses MiniLM).
 - The laptop edition substitutes in-process equivalents for Kafka/Flink/Feast/ClickHouse (README table).
 
+## Upgrade 4 - Redis-backed feature store (Feast blocked)
+
+The plan was Feast with a Redis online store. `uv pip install --dry-run feast --python
+.venv/Scripts/python.exe` against this project's venv resolves `feast==0.67.0` but requires
+downgrading `pandas 3.1.0 -> 2.3.3` *and* `prometheus-client 0.26.0 -> 0.24.1` - the latter would
+break Upgrade 3's `/metrics` instrumentation in `biq/ingest_api.py`/`biq/serve_api.py`. Per the
+session rule (don't downgrade pandas in the shared venv), Feast was not installed; `redis-py`
+(`uv pip install --dry-run redis` resolves cleanly, 1 package, no version changes) talks to Redis
+directly instead, behind the same `FeatureStore` interface (`write`/`flush`/`get_online_features`),
+so `biq/stream_processor.py` and `biq/serve_api.py`'s `/features/{session_id}` route needed no
+changes.
+
+**Training/serving parity** (`tests/feature_parity.py`, 50 random sessions, online snapshot vs.
+`get_historical_features()` at the same timestamp):
+
+| Backend | Match |
+| --- | --- |
+| SQLite (default, `FEATURE_STORE` unset) | 750/750 (100.00%) |
+| Redis (`FEATURE_STORE=redis`) | 750/750 (100.00%) |
+
+**Live proof**: with `KAFKA_BOOTSTRAP=localhost:19092` and `FEATURE_STORE=redis`,
+`stream_processor --live` tailed the real `user-events` Kafka topic (Redpanda) while
+`biq.simulator --http ... --realtime` posted 1,695 events from 150 live sessions through
+`ingest_api`; the consumer group (`biq-stream`) drained to 0 lag, and
+`GET /features/s_000076` on `serve_api.py` (unchanged route) returned that session's live feature
+vector read straight out of Redis. Full commands: `docs/PROGRESS.md` ("Upgrade 4").
+
 ## Upgrade 5 - REES46 real-data replay vs. the simulator
 
 `python run_all.py --dataset rees46` replays the REES46 "eCommerce behavior data from multi

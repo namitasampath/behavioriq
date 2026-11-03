@@ -111,9 +111,25 @@ services:
       prometheus:
         condition: service_healthy
 
+  redis:
+    image: redis:7.4-alpine
+    container_name: redis
+    profiles: ["features"]
+    command: ["redis-server", "--maxmemory", "200mb", "--maxmemory-policy", "allkeys-lru"]
+    ports: ["6379:6379"]
+    volumes: [redis_data:/data]
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
 volumes:
   qdrant_data:
   postgres_data:
   clickhouse_data:
   prometheus_data:
   grafana_data:
+  redis_data:

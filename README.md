@@ -45,7 +45,7 @@ $env:BIQ_LLM_PROVIDER = "ollama"   # BIQ_LLM_MODEL defaults to qwen2.5:3b, BIQ_O
 | 0 Contracts | Event schema, 13-event vocabulary, session and label rules | `biq/schema.py`, `docs/CONTRACTS.md` | |
 | 1 Data | Persona-driven Markov simulator with overlap and 10% noise | `biq/simulator.py` | `data/raw_events.parquet` |
 | 2 Ingestion | FastAPI `/track`, schema validation, dead-letter queue, event bus | `biq/ingest_api.py`, `biq/bus.py` | |
-| 3 Streaming + features | Keyed session state, watermark, 30-min timers; online (SQLite) and offline (Parquet) feature store | `biq/stream_processor.py`, `biq/feature_store.py` | |
+| 3 Streaming + features | Keyed session state, watermark, 30-min timers; online (SQLite, or Redis via `FEATURE_STORE=redis`) and offline (Parquet) feature store | `biq/stream_processor.py`, `biq/feature_store.py` | |
 | 4 Warehouse | Star schema, 8 whitelisted views, hand spot-check | `biq/warehouse.py` | `data/warehouse.duckdb` |
 | 5 Mining | PrefixSpan, FP-Growth, HDBSCAN vs K-Means | `biq/mining.py` | `reports/stage5_mining.md` |
 | 6 Encoder | Transformer, InfoNCE contrastive pretraining, text baseline | `biq/encoder.py` | `reports/stage6_encoder.md` |
@@ -70,6 +70,10 @@ python -m biq.simulator --sessions 200 --http http://127.0.0.1:8000/track --rate
 Serving API (intent, next-best action, SHAP, copilot):
 `uvicorn biq.serve_api:app --port 8001` then open http://127.0.0.1:8001/docs
 
+Add `$env:FEATURE_STORE = "redis"` (with the `features` compose profile up) before step 2 to write
+the online store to Redis instead of SQLite - `GET /features/{session_id}` on the serving API is
+unchanged either way.
+
 MLflow UI: `mlflow ui --backend-store-uri sqlite:///mlflow.db`
 
 ## Running on real data (REES46)
@@ -92,12 +96,17 @@ source data can't give us (missing event types, no device/referrer, no hidden pe
 | --- | --- | --- |
 | JSONL event bus | Kafka / Redpanda | set `KAFKA_BOOTSTRAP=localhost:19092`, `pip install kafka-python`; `bus.py` already uses it |
 | Python session processor | Apache Flink (PyFlink) | port `SessionState.update` into a `KeyedProcessFunction`; the logic is identical |
-| SQLite + Parquet feature store | Feast with Redis online store | `FEATURE_COLUMNS` becomes a Feast FeatureView |
+| SQLite + Parquet feature store | Redis online store (Feast blocked - see below) + Parquet offline store | `docker compose -f infra/docker-compose.yml --profile features up -d --wait`; `pip install redis`; set `FEATURE_STORE=redis`; `feature_store.py` already uses it |
 | DuckDB | ClickHouse (facts) + PostgreSQL (dims) | `pip install clickhouse-connect psycopg2-binary`; `docker compose -f infra/docker-compose.yml --profile warehouse up -d --wait`; set `WAREHOUSE=clickhouse`; `warehouse.py` already uses it |
 | Qdrant local mode | Qdrant server | set `QDRANT_URL=http://localhost:6333` |
 | PSI/KS drift | Evidently AI | `uv venv --python 3.11 .venv-evidently; uv pip install -r requirements-evidently.txt --python .venv-evidently/Scripts/python.exe` (separate venv - Evidently 0.7.23 is incompatible with this project's pandas 3.1.0); set `BIQ_EVIDENTLY=1`; `biq/mlops.py` already shells out to it for an HTML report + dataset-drift verdict per scenario, alongside the existing PSI/domain-classifier result |
 | `/metrics` endpoints | Prometheus + Grafana | `biq/ingest_api.py` and `biq/serve_api.py` already serve `/metrics` via `prometheus-client`; `docker compose -f infra/docker-compose.yml --profile monitoring up -d --wait`; Prometheus at http://localhost:9090, Grafana (anonymous viewer, "BehaviorIQ" dashboard provisioned) at http://localhost:3000 |
 | Hosted Claude API copilot | Free, local LLM (Ollama) | `ollama pull qwen2.5:3b`; set `BIQ_LLM_PROVIDER=ollama`; `copilot.py`'s `ask_ollama()` already uses it through Ollama's OpenAI-compatible endpoint, with the same tools/guardrails/grounding check |
+
+Feast (the originally planned online-store backend) cannot install into this venv without
+downgrading pandas 3.1.0 -> 2.x and prometheus-client (Upgrade 3 depends on the latter) - see
+`docs/PROGRESS.md` ("Upgrade 4") for the dry-run proof. `FEATURE_STORE=redis` talks to Redis
+directly via `redis-py` behind the unchanged `FeatureStore` interface instead.
 
 ## Honest limitations
 

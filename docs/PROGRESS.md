@@ -1,5 +1,112 @@
 # Production upgrade progress
 
+## Upgrade 4 — Redis-backed feature store (Feast blocked) — done (2026-11-04)
+
+`FEATURE_STORE=redis` switches `biq/feature_store.py::FeatureStore`'s online store from SQLite to
+Redis. With it unset (default `"sqlite"`), `run_all.py` and `pytest` behave exactly as before. The
+Parquet offline store (`get_historical_features()`) is identical either way, so there is no
+training/serving skew regardless of backend.
+
+### Dependency check first: Feast 0.67.0 vs. this venv's pandas 3.1.0 pin
+
+The upgrade was planned as Feast with a Redis online store. Checked with a dry run **before**
+touching anything:
+
+```
+uv pip install --dry-run feast --python .venv/Scripts/python.exe
+# -> Resolved 65 packages; would install feast==0.67.0, but would also:
+#    - pandas==3.1.0  ->  + pandas==2.3.3
+#    - prometheus-client==0.26.0  ->  + prometheus-client==0.24.1
+```
+
+Feast needs `pandas<3`; this project pins `pandas 3.1.0` (unpinned in `requirements.txt`, but the
+installed resolver version), and downgrading it is explicitly against the session rule (never
+downgrade pandas in the shared venv — see the Evidently blocker in Upgrade 7 for why: there is no
+separate Feast release that fixes this). Feast's resolution would *also* downgrade
+`prometheus-client`, which Upgrade 3's `/metrics` instrumentation in `biq/ingest_api.py` and
+`biq/serve_api.py` depends on — a second, independent reason not to install it into the main
+venv. Unlike Evidently, Feast is not a side CLI script that can be shelled out to from an isolated
+venv — it needs to be imported in-process by `biq/stream_processor.py` and `biq/serve_api.py` on
+every write/read, so the "separate venv" pattern from Upgrade 7 does not fit here either.
+
+Per the session's own fallback instruction, Feast was **not installed**. Instead:
+
+```
+uv pip install --dry-run redis --python .venv/Scripts/python.exe
+# -> Resolved 1 package; would install redis==8.1.0 - no other package touched
+uv pip install redis --python .venv/Scripts/python.exe
+# -> Installed redis==8.1.0 (confirmed pandas/prometheus-client untouched)
+```
+
+`redis-py` talks to Redis directly behind the **same `FeatureStore` interface**
+(`write()`/`flush()`/`get_online_features()`), so no Feast feature-repo scaffolding
+(`streaming/feature_repo/`) was built — there is nothing to point it at. `get_historical_features()`
+is untouched.
+
+- **`infra/docker-compose.yml`**: added `redis` (`redis:7.4-alpine`, pinned) under a new `features`
+  compose profile — `--maxmemory 200mb --maxmemory-policy allkeys-lru`, `mem_limit: 256m`,
+  healthcheck via `redis-cli ping`. Existing services (redpanda/console/qdrant/postgres/clickhouse/
+  prometheus/grafana) untouched.
+- **`biq/config.py`**: added `FEATURE_STORE_BACKEND` (`FEATURE_STORE`, default `"sqlite"`) and
+  `REDIS_URL` (`BIQ_REDIS_URL`, default `redis://localhost:6379/0`).
+- **`biq/feature_store.py`**: `FeatureStore.__init__` branches on `config.FEATURE_STORE_BACKEND`.
+  SQLite path (`sqlite3`, `INSERT OR REPLACE`) is byte-for-byte what it was before. Redis path uses
+  `redis.Redis.from_url(...)`, one `SET biq:online:<session_id> <json>` per `write()` (latest value
+  wins, same semantics as `INSERT OR REPLACE`), `GET`+`json.loads` for `get_online_features()`, and
+  `SCAN`+`DEL` over `biq:online:*` for `reset=True`. `flush()`'s offline-Parquet logic (the
+  `self.buffer` -> `FEATURE_LOG` append) is identical for both backends — only the `self.db.commit()`
+  call is skipped for Redis (nothing to commit). `biq/stream_processor.py` and
+  `biq/serve_api.py`'s `/features/{session_id}` route needed **no changes** (the point of keeping
+  the interface stable).
+- **`requirements.txt`**: added `redis`.
+- **`tests/feature_parity.py`** (new, not pytest-collected — no `test_`/`_test` in the name, since
+  it needs a store that's already been populated by a replay/live run first): for 50 random
+  sessions, compares the online store's latest snapshot against `get_historical_features()`
+  evaluated at that exact same timestamp, column by column over all 15 `FEATURE_COLUMNS`.
+
+### Verification run (2026-11-04)
+
+```
+docker compose -f infra/docker-compose.yml --profile features up -d --wait
+# -> redis container Healthy (redis-cli ping -> PONG); maxmemory 200MB; other services untouched
+
+python -m pytest -q          # FEATURE_STORE unset
+# -> 10 passed (default SQLite path unaffected)
+
+$env:FEATURE_STORE = "redis"
+python -m biq.stream_processor --replay
+# -> processed 74,513 events -> 6,000 closed sessions, 0 out-of-order
+docker exec redis redis-cli dbsize
+# -> 6000  (one key per session, biq:online:<session_id>)
+python tests/feature_parity.py --n 50 --seed 0
+# -> backend: redis; 50 sessions x 15 columns = 750 values compared; match: 750/750 (100.00%)
+
+Remove-Item Env:\FEATURE_STORE
+python -m biq.stream_processor --replay      # rebuild the default SQLite store
+python tests/feature_parity.py --n 50 --seed 0
+# -> backend: sqlite; match: 750/750 (100.00%)
+python -m pytest -q
+# -> 10 passed (FEATURE_STORE unset again - confirms the rebuild didn't change default behaviour)
+
+# Live proof: Kafka -> stream_processor --live -> Redis -> serve_api, while traffic flows
+$env:KAFKA_BOOTSTRAP = "localhost:19092"; $env:FEATURE_STORE = "redis"
+uvicorn biq.ingest_api:app --port 8010 &
+python -m biq.stream_processor --live &
+python -m biq.simulator --sessions 150 --seed 999 --http http://127.0.0.1:8010/track --rate 50 --realtime
+# -> posted 1,695 events from 150 sessions
+docker exec redpanda rpk group describe biq-stream
+# -> TOTAL-LAG 0 (consumer group drained the live traffic, after first draining an older backlog
+#    left over from a prior session's live-mode testing on the same "biq-stream" group id)
+uvicorn biq.serve_api:app --port 8011 &
+curl http://127.0.0.1:8011/features/s_000076
+# -> {"session_id":"s_000076","event_timestamp":"2026-11-17T04:07:...","event_count":4,...}
+#    (read straight out of Redis through the unchanged /features/{session_id} route)
+curl http://127.0.0.1:8011/features/s_nonexistent_xyz
+# -> 404 (unchanged not-found behaviour)
+# background processes stopped after the check; pipeline/data files rebuilt under the default
+# SQLite backend (see above) so the repo's checked-in default state is unaffected
+```
+
 ## Upgrade 7 — Evidently AI drift reports — done (2026-11-04)
 
 `BIQ_EVIDENTLY=1` switches on Evidently AI HTML drift reports + a dataset-drift verdict alongside

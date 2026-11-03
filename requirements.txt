@@ -21,6 +21,7 @@ mlflow
 clickhouse-connect
 psycopg2-binary
 prometheus-client
+redis
 scipy
 matplotlib
 torch
