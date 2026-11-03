@@ -7,12 +7,17 @@ Valid -> event bus (topic user-events, keyed by session_id). Invalid -> dead-let
 
 /metrics is Prometheus text format (prometheus-client); scraped by the "monitoring" compose
 profile (see infra/docker-compose.yml, infra/prometheus/prometheus.yml).
+
+CORS is open only to http://localhost:3001 (the storefront's dev server, Stage 1) so the browser
+tracking SDK (tracker-sdk/) can POST events straight from the page - fetch's keepalive flag and
+navigator.sendBeacon both still require the ingestion API to answer the CORS preflight.
 """
 from __future__ import annotations
 
 import time
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from pydantic import ValidationError
@@ -21,6 +26,12 @@ from .bus import EventBus
 from .schema import Event
 
 app = FastAPI(title="BehaviorIQ ingestion API")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3001"],
+    allow_methods=["POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
+)
 bus = EventBus()
 
 REQUESTS = Counter(

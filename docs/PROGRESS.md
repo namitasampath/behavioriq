@@ -1,5 +1,114 @@
 # Production upgrade progress
 
+## Stage 1 — Next.js storefront + TypeScript tracking SDK — done (2026-11-04)
+
+Real browser traffic now feeds the pipeline, as an alternative to `biq/simulator.py`:
+`tracker-sdk/` (TypeScript, framework-agnostic) and `storefront/` (Next.js 16 + Tailwind, port
+3001) generate real clickstream events validated against the exact same canonical schema
+(`biq/schema.py`). Not an env-var-gated backend swap like the numbered upgrades above - this is
+purely additive (new `storefront/`/`tracker-sdk/` directories, one CORS middleware line in
+`biq/ingest_api.py`); `run_all.py` and `pytest` are unaffected either way.
+
+- **`tracker-sdk/`** (new): `BehaviorTracker` class, `track(eventType, payload)`. Generates
+  `event_id` via `crypto.randomUUID()` (no `uuid` npm package needed - keeps `node_modules` lean,
+  per the session's disk budget). `anon_user_id` persists forever in `localStorage`; `session_id`
+  persists with a `last_activity` timestamp and rotates (new id, `meta.seq` resets to 0) once idle
+  exceeds `SESSION_TIMEOUT_S` (30 min, same constant the Python side uses). Batches events and
+  flushes every 3s or 10 events (whichever first), retries failed sends with exponential backoff
+  and re-queues on exhaustion (never drops), and flushes immediately via `navigator.sendBeacon` on
+  `pagehide`/`visibilitychange`. `track()`'s payload type (`TrackPayload`) is a closed, named field
+  list (`page`/`product_id`/`category`/`device`/`referrer`) - it has no field for search query text
+  at all, so nothing a caller passes through (even a `query` key) can ever reach a tracked event;
+  `tracker-sdk/test/tracker.test.ts` asserts this directly, plus id generation/uniqueness, session
+  reuse/rotation, dwell_ms computation, batching (size + timer), retry/backoff/re-queue, and
+  `sendBeacon` on page-hide - 12 tests, Vitest + happy-dom (lighter than jsdom).
+- **`storefront/`** (new): Next.js 16 App Router + TypeScript + Tailwind v4, no other UI library.
+  Pages: home, search (`?q=`), listing (`?category=`), product detail, reviews, compare (up to 3,
+  via a `localStorage` compare list), cart, checkout, confirmation - reading `data/catalogue.json`
+  straight from the repo root (`lib/catalogue.ts`, server-only `fs` read, no duplicated data) and
+  deriving a display name (the catalogue has no title field). Cart is a small React Context
+  (`lib/cart.tsx`) persisted to `localStorage`; no state-management library added. Every vocabulary
+  event fires from an intentional place: `page_view` (route-change effect, all pages), `search`
+  (search results mount, one per distinct query), `click` (category chips, product cards),
+  `scroll` (25%-depth buckets, not every pixel), `hover` (first hover per card), `product_view`
+  (product page mount), `review_view` (reviews page mount), `compare` (compare page mount),
+  `add_to_cart`/`remove_from_cart` (cart actions), `checkout_start` (checkout mount), `purchase`
+  (confirmation mount, `page: "/confirmation"` - matches `simulator.py`'s own convention),
+  `exit` (page-hide, same handler flushes via beacon). Both `tracker-sdk/` and `storefront/` run on
+  webpack (`next dev --webpack` / `next build --webpack`) rather than Turbopack - Turbopack's
+  resolver cannot find the `file:`-linked local `tracker-sdk/` package (`Module not found: Can't
+  resolve 'behavior-tracker'`, confirmed with a plain `next build`); webpack resolves it via
+  `transpilePackages: ["behavior-tracker"]`.
+- **`biq/ingest_api.py`**: added `CORSMiddleware`, `allow_origins=["http://localhost:3001"]` only,
+  `POST`/`OPTIONS`, `Content-Type` header - the storefront's only cross-origin dependency.
+- **`biq/stream_processor.py`**: `live()` now prints `session closed: <id> outcome=<...>
+  reason=<...> events=<n>` the instant a session closes (any reason), not just the existing
+  every-50-events progress line - needed to actually observe a close in real time against sparse,
+  human-paced browser traffic instead of bulk simulator volume. `flush=True` added to `live()`'s
+  prints too (stdout was block-buffered when redirected to a file, so prints weren't appearing
+  until the buffer filled - a verification-visibility issue, not a pipeline bug).
+
+### Two real bugs found during the end-to-end verification (not staged/injected - hit organically)
+
+1. **`tracker-sdk/src/tracker.ts`: `this.fetchImpl = globalThis.fetch` threw "Illegal invocation"
+   on every real send.** An unbound reference to `fetch` loses the `this` binding its native
+   implementation requires; `sendWithRetry()`'s own `try/catch` swallowed the `TypeError` on every
+   attempt, so the bug was silent - no console error, requests just never completed, buffer
+   re-queued and retried forever. Found by temporarily adding `console.log` around the fetch call
+   (removed once the bug was found) and confirming the thrown error message in the browser console
+   directly, after a raw `fetch()` call typed into devtools worked fine (misleading at first - that
+   specific unbound-call pattern happens not to throw when evaluated as a bare top-level script).
+   Fix: `globalThis.fetch.bind(globalThis)`. 12/12 `tracker-sdk` tests still pass (they inject a
+   mock `fetchImpl`, so they never exercised the real binding).
+2. **Two pre-existing, foreign dev-server processes** (an old `ingest_api` on port 8000 without
+   the new CORS middleware, and a second `stream_processor --live` sharing the Kafka consumer
+   group `biq-stream`) were left running from earlier, unrelated sessions on this machine. Auto
+   mode's safety classifier correctly blocked stopping either without asking first (`Stop-Process`
+   on a process this session didn't start); the user approved both stops explicitly before they
+   were stopped. Not a code bug, but worth recording: `ingest_api`/`stream_processor --live`
+   processes left running between sessions on a shared dev machine will silently serve stale code
+   to the next session that assumes a clean restart.
+
+### Verification run (2026-11-04)
+
+```
+cd tracker-sdk && npm install && npm test
+# -> 12/12 passed (Vitest + happy-dom)
+
+cd storefront && npm install && npm run build
+# -> next build --webpack: compiled successfully, 10/10 routes, TypeScript clean
+
+uvicorn biq.ingest_api:app --port 8000          # KAFKA_BOOTSTRAP=localhost:19092, CORS for :3001
+python -m biq.stream_processor --live           # KAFKA_BOOTSTRAP=localhost:19092
+npm run dev                                      # storefront, port 3001
+
+# claude-in-chrome: clicked through home -> search "sports" -> product -> reviews -> cart ->
+# checkout -> confirmation (purchase), plus category filters, compare, hover, scroll, remove_from_cart
+
+curl http://127.0.0.1:8000/metrics | grep biq_events
+# -> biq_events_accepted_total 65, biq_events_rejected_total 0 (0 schema-validation failures
+#    across every event the storefront ever sent, across the whole session)
+
+# direct Kafka read (kafka-python, partition 5, where this session_id hashes):
+# page_view, product_view, add_to_cart, checkout_start, purchase - full funnel present on the topic
+
+# stream_processor --live stdout:
+# "session closed: s_44e1795173ae4ff0 outcome=purchase reason=purchase events=12"
+# (outcome correctly "purchase" per biq/schema.py::label_session - the session's event list
+# included add_to_cart AND purchase, and the purchase rule takes precedence)
+
+python -m pytest -q
+# -> 10 passed (ingest_api/stream_processor changes are additive; default pipeline unaffected)
+```
+
+Disk: ~6.2 GB free after Node.js LTS (`winget install OpenJS.NodeJS.LTS`) + both `node_modules`
+trees (`tracker-sdk/` ~49 packages, `storefront/` ~370 packages, no extra UI/state libraries) -
+within the session's ~5 GB budget. The storefront dev server, `ingest_api`, and `stream_processor
+--live` processes started for this verification were left running (the safety classifier also
+blocks this session from stopping its own long-running processes); stop them manually
+(`Stop-Process` by PID, or close the terminal) when done, or just leave them - they're idle no-ops
+with no active Kafka backlog.
+
 ## Upgrade 4 — Redis-backed feature store (Feast blocked) — done (2026-11-04)
 
 `FEATURE_STORE=redis` switches `biq/feature_store.py::FeatureStore`'s online store from SQLite to

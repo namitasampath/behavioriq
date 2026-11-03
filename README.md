@@ -43,7 +43,7 @@ $env:BIQ_LLM_PROVIDER = "ollama"   # BIQ_LLM_MODEL defaults to qwen2.5:3b, BIQ_O
 | Stage | What it does | Code | Output |
 | --- | --- | --- | --- |
 | 0 Contracts | Event schema, 13-event vocabulary, session and label rules | `biq/schema.py`, `docs/CONTRACTS.md` | |
-| 1 Data | Persona-driven Markov simulator with overlap and 10% noise | `biq/simulator.py` | `data/raw_events.parquet` |
+| 1 Data | Persona-driven Markov simulator with overlap and 10% noise; or real browser traffic from the storefront + tracking SDK | `biq/simulator.py`; `storefront/`, `tracker-sdk/` | `data/raw_events.parquet` |
 | 2 Ingestion | FastAPI `/track`, schema validation, dead-letter queue, event bus | `biq/ingest_api.py`, `biq/bus.py` | |
 | 3 Streaming + features | Keyed session state, watermark, 30-min timers; online (SQLite, or Redis via `FEATURE_STORE=redis`) and offline (Parquet) feature store | `biq/stream_processor.py`, `biq/feature_store.py` | |
 | 4 Warehouse | Star schema, 8 whitelisted views, hand spot-check | `biq/warehouse.py` | `data/warehouse.duckdb` |
@@ -75,6 +75,43 @@ the online store to Redis instead of SQLite - `GET /features/{session_id}` on th
 unchanged either way.
 
 MLflow UI: `mlflow ui --backend-store-uri sqlite:///mlflow.db`
+
+## Storefront + tracking SDK (real browser traffic, Stage 1)
+
+A small Next.js storefront (`storefront/`) and a TypeScript tracking SDK (`tracker-sdk/`) generate
+*real* clickstream events from an actual browser session instead of the simulator - same event
+vocabulary, same canonical schema (`biq/schema.py`), same ingestion pipeline.
+
+```powershell
+# 1  ingestion API (CORS-open to the storefront's origin only)
+uvicorn biq.ingest_api:app --port 8000
+# 2  stream processor tailing the event bus
+$env:KAFKA_BOOTSTRAP = "localhost:19092"; python -m biq.stream_processor --live
+# 3  storefront, on port 3001 (3000 is Grafana)
+cd storefront; npm install; npm run dev
+```
+
+Open http://localhost:3001, click through home -> search -> a product -> reviews/compare -> cart ->
+checkout -> confirmation, and watch `biq_events_accepted_total` climb at
+http://127.0.0.1:8000/metrics and sessions close in the stream processor's own output
+(`session closed: <id> outcome=<purchase|abandon|browse> ...`).
+
+`tracker-sdk/` is a standalone package (`cd tracker-sdk; npm install; npm test` - Vitest) exporting
+`BehaviorTracker`, a browser-only class with `track(eventType, payload)`: generates `event_id`
+(uuid v4), persists `anon_user_id`/`session_id` in `localStorage` (session rotates after 30 min
+idle, matching `SESSION_TIMEOUT_S`), stamps `meta.seq`/`scroll_depth`/`dwell_ms`, batches and
+flushes every 3s or 10 events, retries with backoff, and flushes immediately via
+`navigator.sendBeacon` on page hide. `track()`'s payload is a closed, named field list - there is
+no field for search query text anywhere in it, so a caller can never leak one into a tracked event
+even by accident (`tracker-sdk/test/tracker.test.ts` asserts this directly).
+
+The storefront imports `tracker-sdk/` as a local `file:` dependency (`behavior-tracker` in
+`storefront/package.json`, resolved as an npm symlink - no duplicated `node_modules`) and reads
+`data/catalogue.json` straight from the repo (`storefront/lib/catalogue.ts`, server-only) instead
+of duplicating product data. Both dev servers run on webpack (`--webpack`) rather than Turbopack -
+Turbopack's resolver can't currently find a `file:`-linked local package
+(`Module not found: Can't resolve 'behavior-tracker'`), confirmed with a plain `next build`;
+webpack resolves it fine via `transpilePackages`.
 
 ## Running on real data (REES46)
 
