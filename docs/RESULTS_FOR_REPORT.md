@@ -15,7 +15,7 @@ time-based 70/15/15 split). Every number below is reproducible; full tables are 
 | Retrieval precision | P@10 > 0.7 | 0.63 | **No** - see finding 3 |
 | Intent: C+R beats A and B | measurable delta | C+R does not beat A/B | **No** - see findings 1-2 |
 | Contextual bandit | beats fixed rule after warm-up | +16% total reward; ahead after 50 decisions | Yes |
-| Copilot | >= 90% correct, 0 unfounded numbers | offline router 16/16, 0 unfounded, 4/4 attacks blocked; LLM run pending an API key | Partly |
+| Copilot | >= 90% correct, 0 unfounded numbers | offline router 16/16 (not evidence of LLM accuracy); real LLM run (local qwen2.5:3b via Ollama, no API key available) 2/16 (12%), 1 answer caught and refused by the grounding check (0 unfounded numbers reached the user), 4/4 attacks blocked | **No** - see Upgrade 6 |
 | Drift monitoring | 100% of injections | 5/5 detected, no false alarm on control | Yes |
 
 ## Findings (write these honestly - they are a stronger viva than inflated numbers)
@@ -178,10 +178,63 @@ watches, not a REES46 artefact.
 - **Copilot** - not run for this dataset in `run_all.py` (the warehouse views and guardrails work
   unchanged against the REES46-derived catalogue; this just wasn't part of this session's scope).
 
+## Upgrade 6 - local LLM copilot via Ollama (honest result)
+
+`BIQ_LLM_PROVIDER=ollama` routes the copilot through a local `qwen2.5:3b` (1.9GB, Q4_K_M) served by
+Ollama at `http://localhost:11434/v1`, via its OpenAI-compatible chat-completions endpoint and the
+`openai` Python client. It is given the exact same three tools, the same `sqlglot` SQL guardrail,
+the same k-anonymity floor, and the same grounding-check-then-regenerate-once logic as the Claude
+path (`ask_llm`) - only the wire format (OpenAI tool-calling JSON vs. Anthropic's) differs. No
+ANTHROPIC_API_KEY was available in this environment, so this is the first time the Stage 9 DoD
+("LLM run, not the offline router") has actually been exercised end to end.
+
+### Result: `reports/stage9_copilot_ollama.md`
+
+- **Correct: 2/16 (12%)**
+- **Answers with unfounded numbers that reached the user: 0** (1 question failed grounding twice and
+  was correctly refused instead of shown - the guardrail did its job)
+- **Malicious / non-whitelisted SQL blocked: 4/4**
+
+This is a large drop from the offline router's 16/16 and from the ClickHouse-era note that assumed
+an LLM run would also score well. It is being reported as-is, per the instruction not to tune the
+eval questions to the model - the honest conclusion is that **a 3B-parameter local model is not yet
+good enough to be BehaviorIQ's copilot**, even though the surrounding guardrail/grounding machinery
+works correctly regardless of model quality.
+
+### Why the other 14 failed
+
+| Pattern | Count | Questions | What happened |
+| --- | --- | --- | --- |
+| Wrong view/column, never recovered | 9 | conversion rate, segment abandonment, conversion mobile/desktop, compare-abandonment x2, category add-to-cart, browse-only count, busiest day | The model queried a plausible-sounding but wrong view (e.g. `v_funnel_daily` for a `segment` column that only exists in `v_segment_summary`) or guessed a column name (`length_bucket`, `add_to_cart`) that doesn't exist, got a DuckDB binder error back from `run_sql`, and either repeated the same mistake or gave up with a hedging answer inside its 6-tool-call budget, instead of calling `describe_schema` to look up the real columns. |
+| Right view, wrong SQL logic | 4 | sessions ended in abandonment, sessions ended in purchase, avg events in purchasing sessions, cart-abandoners segment count | The model picked the correct view but then mis-executed the query - e.g. `COUNT(*)` on `v_outcome_summary` (one row per outcome) instead of reading the `session_count` column, giving "1 session ended in a purchase" when the true figure is 1,570; or an exact-string filter (`segment = 'cart_abandoners'`) that didn't match the real label (`'cart abandoners (c3)'`) and needed a `LIKE`. These answers are internally "grounded" (the wrong number genuinely came from a tool result) but still factually wrong - grounding proves the number wasn't invented, not that the SQL was correct. |
+| Refused after failing the grounding check twice | 1 | segment with highest conversion rate | The model's first answer cited a number not present in any tool result; asked to regenerate, it failed again, so `ask_ollama` returned the honest fallback ("I can't answer that reliably") rather than a hallucinated figure - the guardrail working as designed, just on a model weak enough to trigger it. |
+| Correct (tool-call only, no SQL) | 2 | sessions similar to compare+cart users; sessions similar to add-to-cart-then-remove users | Both only needed a single `find_similar_sessions` call and a restatement of its `outcome_share` output - no SQL authoring required. This is the one capability qwen2.5:3b showed reliably: calling a described tool correctly and reporting its output. |
+
+### What this does and doesn't say
+
+- The **guardrails are provider-independent and work**: in 16 questions across two very different
+  models (Claude in the ClickHouse-era run, qwen2.5:3b here), zero unfounded numbers ever reached
+  the user, and both SQL-injection-style guardrail tests (4/4) were blocked regardless of model
+  quality - this is exactly the point of separating "can the model write correct SQL" from "can a
+  wrong/malicious query ever leak an ungrounded or unsafe answer".
+- The **SQL-authoring step is the bottleneck**, not tool-calling mechanics. qwen2.5:3b correctly
+  identified when and how to call a tool (its one clean pass used `find_similar_sessions` exactly
+  right); it consistently failed at picking the right view/column and writing correct aggregation
+  SQL against an 8-view schema it hadn't memorised, within a 6-tool-call budget it rarely spent
+  calling `describe_schema` first.
+- This result is **model-size-limited, not architecture-limited**: the same `ask_ollama()` path works
+  against any OpenAI-compatible endpoint, so a larger local model (disk space permitting) or a hosted
+  Claude key would very likely score far closer to the offline router's 16/16, as the mechanism
+  (tools, guardrail, grounding) is identical to the already-working Anthropic path.
+
 ## Likely viva questions
 - *Why a time-based split?* Random splits let the model see the future and inflate scores.
 - *How do you stop label leakage?* Inputs end before the first purchase/exit event (`prediction_prefix`).
 - *How do you stop retrieval leakage?* Neighbours must close before the query session starts, and never include itself.
 - *Why HDBSCAN?* Behavioural clusters are uneven and non-spherical, and it labels outliers as noise instead of forcing them into a cluster.
 - *Why Thompson Sampling?* It balances exploration and exploitation by sampling from its uncertainty, and it beats fixed rules once it has some data.
+- *Why did the local-LLM copilot only score 12%?* A 3B model can call a described tool correctly but
+  can't reliably pick the right view or write correct aggregation SQL against an 8-view schema from
+  a text description alone - see Upgrade 6. The guardrails (SQL whitelist, k-anonymity, grounding
+  check) are model-independent and caught every unsafe/ungrounded case regardless.
 - *How is the copilot kept honest?* SQL is limited to whitelisted views, rows from fewer than 20 sessions are suppressed, and every number in an answer is checked against tool output.

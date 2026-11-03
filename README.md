@@ -31,6 +31,13 @@ $env:ANTHROPIC_API_KEY = "sk-ant-..."
 
 Without a key the copilot runs in a labelled offline mode, using the same tools and guardrails.
 
+Or, free and fully local, via [Ollama](https://ollama.com) (no API key, no cloud calls):
+
+```powershell
+ollama pull qwen2.5:3b          # one-time, ~2GB
+$env:BIQ_LLM_PROVIDER = "ollama"   # BIQ_LLM_MODEL defaults to qwen2.5:3b, BIQ_OLLAMA_URL to http://localhost:11434/v1
+```
+
 ## What each stage is and where it lives
 
 | Stage | What it does | Code | Output |
@@ -44,7 +51,7 @@ Without a key the copilot runs in a labelled offline mode, using the same tools 
 | 6 Encoder | Transformer, InfoNCE contrastive pretraining, text baseline | `biq/encoder.py` | `reports/stage6_encoder.md` |
 | 7 Retrieval | Qdrant collections, no-self / no-future filter, P@K, MRR, NDCG, latency | `biq/retrieval.py` | `reports/stage7_retrieval.md` |
 | 8 Intent + bandit | A / B / C_base / C / C+R / C-ft, early-prediction curve, bootstrap; Thompson Sampling vs LinUCB vs rules | `biq/intent.py`, `biq/bandit.py` | `reports/stage8/` |
-| 9 Copilot | Claude tool use, sqlglot guard, k-anonymity floor, grounding check, eval set | `biq/copilot.py` | `reports/stage9_copilot.md` |
+| 9 Copilot | Claude tool use (or a free local LLM via Ollama), sqlglot guard, k-anonymity floor, grounding check, eval set | `biq/copilot.py` | `reports/stage9_copilot.md` (`_ollama.md` variant) |
 | 10 MLOps | MLflow runs + registry (`@champion`), PSI/KS drift with 5 injections, SHAP | `biq/mlops.py`, `biq/serving.py` | `reports/stage10_drift.md` |
 | 11 Dashboard | Overview, session journey with live re-prediction, segments, research, copilot, monitoring | `dashboard/app.py` | |
 | 12 Packaging | One-command pipeline, tests, CI | `run_all.py`, `tests/`, `.github/workflows/ci.yml` | |
@@ -90,6 +97,7 @@ source data can't give us (missing event types, no device/referrer, no hidden pe
 | Qdrant local mode | Qdrant server | set `QDRANT_URL=http://localhost:6333` |
 | PSI/KS drift | Evidently AI | same statistics; Evidently adds HTML reports |
 | `/metrics` endpoints | Prometheus + Grafana | `biq/ingest_api.py` and `biq/serve_api.py` already serve `/metrics` via `prometheus-client`; `docker compose -f infra/docker-compose.yml --profile monitoring up -d --wait`; Prometheus at http://localhost:9090, Grafana (anonymous viewer, "BehaviorIQ" dashboard provisioned) at http://localhost:3000 |
+| Hosted Claude API copilot | Free, local LLM (Ollama) | `ollama pull qwen2.5:3b`; set `BIQ_LLM_PROVIDER=ollama`; `copilot.py`'s `ask_ollama()` already uses it through Ollama's OpenAI-compatible endpoint, with the same tools/guardrails/grounding check |
 
 ## Honest limitations
 
@@ -101,5 +109,11 @@ source data can't give us (missing event types, no device/referrer, no hidden pe
   all, so several conclusions (device segmentation, the early-prediction curve, anything touching
   consideration events) don't transfer - see `docs/RESULTS_FOR_REPORT.md`.
 * The bandit can only be evaluated in simulation, because logged data does not show the outcomes of actions that were not taken.
+* The free local-LLM copilot (`BIQ_LLM_PROVIDER=ollama`, `qwen2.5:3b`) scores 2/16 (12%) on the Stage 9
+  eval set, well below the offline router's 16/16 and the >=90% DoD target - it reliably calls the
+  one tool that needs no SQL, but mostly picks the wrong view or writes wrong SQL against the 8-view
+  schema. The guardrails caught every unfounded/malicious case regardless (0 unfounded numbers
+  reached the user, 4/4 attacks blocked) - see `docs/RESULTS_FOR_REPORT.md` ("Upgrade 6") for the
+  full breakdown. Treat it as a free, private, honestly-labelled demo mode, not a Claude replacement.
 * Heavy infrastructure (Kafka, Flink, Feast, ClickHouse) is replaced by in-process equivalents, as listed above.
 * In `WAREHOUSE=clickhouse` mode, `fact_user_events` is append-only across warehouse rebuilds (never truncated, unlike DuckDB's full `CREATE OR REPLACE TABLE`) because a ClickHouse Kafka-engine materialized view keeps inserting into it continuously; `ReplacingMergeTree(ingested_at)` + `FINAL` dedup duplicate `event_id`s at query time instead. Raw (pre-merge) row count grows with every rebuild as a result.

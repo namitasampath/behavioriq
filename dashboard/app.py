@@ -165,7 +165,12 @@ with tabs[3]:
 with tabs[4]:
     import os
     from biq.copilot import ask
-    mode = f"Claude ({config.LLM_MODEL})" if os.getenv("ANTHROPIC_API_KEY") else "offline mode (set ANTHROPIC_API_KEY for open questions)"
+    if config.LLM_PROVIDER == "ollama":
+        mode = f"local LLM via Ollama ({config.LLM_MODEL})"
+    elif os.getenv("ANTHROPIC_API_KEY"):
+        mode = f"Claude ({config.LLM_MODEL})"
+    else:
+        mode = "offline mode (set ANTHROPIC_API_KEY, or BIQ_LLM_PROVIDER=ollama, for open questions)"
     st.caption(f"Answers come only from the warehouse and the vector index. Mode: {mode}. "
                f"Figures from fewer than {config.K_ANON_MIN} sessions are withheld.")
     examples = ["Which behavioral segment has the highest abandonment rate?", "What is the conversion rate on mobile?",

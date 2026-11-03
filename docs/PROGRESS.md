@@ -1,5 +1,93 @@
 # Production upgrade progress
 
+## Upgrade 6 — local LLM copilot via Ollama — done (2026-11-03)
+
+`BIQ_LLM_PROVIDER=ollama` switches `biq/copilot.py::ask()` to `ask_ollama()`, which talks to a local
+Ollama server (model `qwen2.5:3b`, free, already pulled; no other model was pulled - disk space is
+tight) through its OpenAI-compatible endpoint (`http://localhost:11434/v1`, `BIQ_OLLAMA_URL`) using
+the `openai` Python package. With `BIQ_LLM_PROVIDER` unset (default `"anthropic"`), `ask()`'s
+dispatch logic is unchanged: `ANTHROPIC_API_KEY` set → `ask_llm()`, otherwise the offline router —
+so `run_all.py` and `pytest` behave exactly as before.
+
+- **`biq/config.py`**: added `LLM_PROVIDER` (`BIQ_LLM_PROVIDER`, default `"anthropic"`) and
+  `OLLAMA_BASE_URL` (`BIQ_OLLAMA_URL`, default `http://localhost:11434/v1`); `LLM_MODEL` now
+  defaults to `qwen2.5:3b` when the provider is `"ollama"` and to `claude-haiku-5-5` otherwise
+  (`BIQ_LLM_MODEL` still overrides either).
+- **`biq/copilot.py`**: new `ask_ollama()` reuses `TOOLS`/`IMPL`/`guard_sql`/`run_sql`/`grounded()`
+  unchanged - only `OPENAI_TOOLS` (a thin reshape of `TOOLS` into OpenAI's
+  `{"type": "function", "function": {...}}` tool-calling format) and the chat-completions loop are
+  new. Same regenerate-once-then-refuse flow as `ask_llm()`: on an ungrounded answer, the bad
+  numbers are reported back to the model and it gets one retry before the honest refusal. `ask()`
+  now checks `config.LLM_PROVIDER == "ollama"` first (falling back to offline mode if the server/model
+  is unreachable, same pattern as the existing Anthropic network-error fallback), otherwise keeps the
+  original `ANTHROPIC_API_KEY` check. `evaluate()` writes `reports/stage9_copilot_ollama.md` when the
+  provider is `ollama` and `reports/stage9_copilot.md` otherwise, so neither report overwrites the
+  other.
+- **`dashboard/app.py`**: the "Ask BehaviorIQ" tab's mode caption now shows "local LLM via Ollama
+  (qwen2.5:3b)" when `BIQ_LLM_PROVIDER=ollama`, "Claude (...)" when `ANTHROPIC_API_KEY` is set, and
+  the offline-mode message otherwise - it calls the same `biq.copilot.ask()`, so no other dashboard
+  change was needed. `biq/serve_api.py`'s `/ask` route already only calls `copilot.ask()`, so it
+  picks up the new provider automatically too.
+- **`requirements.txt`**: added `openai`.
+
+### Honest result: `reports/stage9_copilot_ollama.md`
+
+Ran `python -m biq.copilot --eval` with `BIQ_LLM_PROVIDER=ollama` against the simulated DuckDB
+warehouse (`QDRANT_URL=http://localhost:6333` to avoid the pre-existing embedded-Qdrant file-lock
+limitation, same workaround as the ClickHouse-era eval runs):
+
+- **Correct: 2/16 (12%)** — far below the offline router's 16/16 and the >=90% DoD target.
+- **Unfounded numbers that reached the user: 0** (1 question failed the grounding check twice and
+  was correctly refused rather than shown).
+- **Malicious/non-whitelisted SQL blocked: 4/4.**
+
+This was **not tuned to the model** — same 16 eval questions as every prior copilot run. The failures
+break down as: 9/14 picked the wrong view or guessed a non-existent column and never recovered
+within the 6-tool-call budget (e.g. looked for `segment` in `v_funnel_daily` instead of
+`v_segment_summary`); 4/14 picked the right view but wrote wrong SQL (e.g. `COUNT(*)` on an
+already-aggregated view instead of reading its `session_count` column, or an exact-string filter
+that didn't match the real label); 1/14 failed grounding twice and was refused. The 2 correct answers
+both needed only a single `find_similar_sessions` tool call with no SQL authoring. Full breakdown,
+and why this is model-size-limited rather than a guardrail problem (zero unfounded numbers reached
+the user across both the Claude and Ollama runs, and both SQL-attack tests are 4/4 blocked
+regardless of model): `docs/RESULTS_FOR_REPORT.md` ("Upgrade 6").
+
+### Verification run (2026-11-03)
+
+```
+curl http://localhost:11434/api/tags
+# -> qwen2.5:3b present, capabilities: ["completion","tools"]; no other model pulled
+
+uv pip install openai --python .venv/Scripts/python.exe
+# -> openai 3.42.1 (installing into the venv, not the global interpreter pip resolved to)
+
+$env:BIQ_LLM_PROVIDER = "ollama"
+python -m biq.copilot "Which segment has the highest abandonment rate?"
+# -> real tool-calling round trip against DuckDB confirmed (SELECT segment, session_count,
+#    abandonment_rate FROM v_segment_summary ORDER BY abandonment_rate DESC LIMIT 1 -> "cart
+#    abandoners (c3)", 100.00%, 1,005 sessions), mode: "qwen2.5:3b"
+
+$env:QDRANT_URL = "http://localhost:6333"   # embedded-Qdrant file lock, same as prior eval runs
+python -m biq.copilot --eval
+# -> reports/stage9_copilot_ollama.md: 2/16 (12%) correct, 0 unfounded numbers reached the user,
+#    4/4 attacks blocked (full per-question table and failure analysis above)
+
+# serve_api /ask, live:
+uvicorn biq.serve_api:app --port 8011   # (BIQ_LLM_PROVIDER=ollama, QDRANT_URL set)
+curl -X POST http://127.0.0.1:8011/ask -d '{"question":"How many sessions ended in a purchase?"}'
+# -> {"mode": "qwen2.5:3b", "answer": "...", "grounded": true, "sql": [...]}  (24s wall time)
+
+# dashboard "Ask BehaviorIQ" tab, live (streamlit run dashboard/app.py, same env):
+# -> caption reads "Mode: local LLM via Ollama (qwen2.5:3b)"; asked "What do sessions similar to
+#    users who compared multiple products usually end in?" -> answered correctly ("browse 90%,
+#    abandon 10%, mean similarity 0.9286") with "every number above was checked" grounding note -
+#    screenshotted via claude-in-chrome
+
+pytest
+# -> 10 passed, BIQ_LLM_PROVIDER/BIQ_OLLAMA_URL/ANTHROPIC_API_KEY all unset (default anthropic-gated
+#    path unaffected)
+```
+
 ## Upgrade 5 — REES46 real-data replay — done (2026-11-03)
 
 `python run_all.py --dataset rees46 [--sessions N]` replays the REES46 "eCommerce behavior data

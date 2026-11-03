@@ -44,6 +44,11 @@ POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "biq_pw")
 # service names on the Docker network, not "localhost" like the vars above)
 POSTGRES_HOST_IN_DOCKER = os.getenv("POSTGRES_HOST_IN_DOCKER", "postgres")
 KAFKA_BOOTSTRAP_IN_DOCKER = os.getenv("KAFKA_BOOTSTRAP_IN_DOCKER", "redpanda:9092")
-LLM_MODEL = os.getenv("BIQ_LLM_MODEL", "claude-haiku-5-5")
+
+# LLM copilot backend: "anthropic" (default, needs ANTHROPIC_API_KEY) or "ollama" (free, local,
+# needs an Ollama server reachable at OLLAMA_BASE_URL with BIQ_LLM_MODEL pulled)
+LLM_PROVIDER = os.getenv("BIQ_LLM_PROVIDER", "anthropic")
+OLLAMA_BASE_URL = os.getenv("BIQ_OLLAMA_URL", "http://localhost:11434/v1")
+LLM_MODEL = os.getenv("BIQ_LLM_MODEL", "qwen2.5:3b" if LLM_PROVIDER == "ollama" else "claude-haiku-5-5")
 SEED = int(os.getenv("BIQ_SEED", "42"))
 N_SESSIONS = int(os.getenv("BIQ_N_SESSIONS", "6000"))
