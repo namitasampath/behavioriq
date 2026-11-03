@@ -1,5 +1,98 @@
 # Production upgrade progress
 
+## Upgrade 3 — Prometheus + Grafana observability — done (2026-11-03)
+
+The `monitoring` compose profile (Prometheus + Grafana) is purely additive: with it not started, the
+apps behave exactly as before except that `/metrics` is now real Prometheus text format instead of
+hand-written strings — no env var gates this, since the metrics format change has no effect on
+`run_all.py` or `pytest` either way (neither touches `ingest_api`/`serve_api`), and `/metrics` is
+dead code until something scrapes it.
+
+- `biq/ingest_api.py` and `biq/serve_api.py` now use `prometheus-client` instead of hand-built text:
+  a `prometheus_client.Counter`/`Histogram`-based middleware records `..._requests_total{endpoint,
+  method, status}` and `..._request_latency_seconds{endpoint}` for every route (endpoint label is the
+  route *template*, e.g. `/predict/{session_id}`, not the literal path — using the literal path would
+  blow up cardinality one label-series per session). Domain counters: `biq_events_accepted_total`,
+  `biq_events_rejected_total` (ingest); `biq_predictions_total{predicted_class}`,
+  `biq_bandit_actions_total{action}`, `biq_copilot_questions_total`,
+  `biq_copilot_blocked_queries_total` (serve — the last one counts copilot tool calls where
+  `run_sql()`'s guardrail returned `blocked: True`).
+- `infra/docker-compose.yml`: added `prometheus` (`prom/prometheus:v2.54.1`) and `grafana`
+  (`grafana/grafana:11.2.0`) under a new `monitoring` profile, pinned, healthchecked, memory-limited.
+  Prometheus scrapes `host.docker.internal:8000`/`:8001` (the FastAPI apps run on the Windows host,
+  not in Docker) plus `redpanda:9644/public_metrics` and `clickhouse:9363/metrics` over the compose
+  network — no port needed to be published on redpanda/console/qdrant (untouched, per the rules) since
+  container-to-container traffic doesn't need the host port mapping.
+- ClickHouse's built-in Prometheus exporter is enabled via a config.d override
+  (`infra/clickhouse/prometheus.xml`, mounted read-only) exposing `:9363/metrics`; this only adds a
+  listener, so `WAREHOUSE=clickhouse` behaviour is unchanged.
+- `infra/grafana/provisioning/{datasources,dashboards}` + `infra/grafana/dashboards/behavioriq.json`
+  provision a pinned-uid Prometheus datasource and the "BehaviorIQ" dashboard on startup, no clicking
+  required. Anonymous viewer access is on (`GF_AUTH_ANONYMOUS_ENABLED`); admin credentials come from
+  `.env` (`.env.example` added at repo root, `GF_SECURITY_ADMIN_USER`/`GF_SECURITY_ADMIN_PASSWORD`).
+  Panels: events/sec (accepted vs rejected), rejected events total, ingest `/track` p95 latency,
+  Redpanda consumer lag (`redpanda_kafka_max_offset` joined against
+  `redpanda_kafka_consumer_group_committed_offset` on topic+partition — Redpanda's metrics don't
+  expose lag directly, there's no single `..._lag` series), predictions by class, bandit action mix,
+  copilot questions (+ blocked queries).
+
+### Verification run (2026-11-03)
+
+```
+docker compose -f infra/docker-compose.yml --profile warehouse --profile monitoring up -d --wait
+# -> qdrant, postgres, redpanda, console, clickhouse, prometheus, grafana all Healthy
+
+uv pip install prometheus-client
+
+$env:KAFKA_BOOTSTRAP = "localhost:19092"; $env:QDRANT_URL = "http://localhost:6333"
+uvicorn biq.ingest_api:app --port 8000 &
+uvicorn biq.serve_api:app --port 8001 &
+
+python -m biq.simulator --sessions 600 --http http://127.0.0.1:8000/track --rate 50 --realtime
+# -> ~2 minutes of live traffic; ingest_api /metrics: biq_events_accepted_total 7709,
+#    biq_events_rejected_total 0, biq_ingest_requests_total{endpoint="/track",...} 771
+
+# hit /predict/{id}, /decide/{id} x6, POST /predict, POST /ask x2
+curl http://127.0.0.1:8001/predict/s_005773 ... (purchase/abandon/browse mix)
+curl http://127.0.0.1:8001/decide/s_005773  ... (compare_helper/social_proof/discount_nudge mix)
+curl -X POST http://127.0.0.1:8001/ask -d '{"question":"Which device has the highest conversion rate?"}'
+# -> serve_api /metrics: biq_predictions_total{predicted_class="purchase"} 1, {"abandon"} 4,
+#    {"browse"} 2; biq_bandit_actions_total{action="compare_helper"} 5, {"social_proof"} 1,
+#    {"discount_nudge"} 1; biq_copilot_questions_total 2
+# -> endpoint labels confirmed as route templates: biq_serve_requests_total{endpoint="/predict/{session_id}",...} 6
+#    (not one series per session_id)
+
+# blocked-query counter verified directly (no ANTHROPIC_API_KEY in this run, so the rule-based
+# offline copilot router never emits a blocked tool call organically): TestClient + a monkeypatched
+# copilot.ask() returning {"blocked": True} in tool_outputs -> biq_copilot_blocked_queries_total 1.0
+
+# Prometheus API proof (http://localhost:9090):
+curl 'http://localhost:9090/api/v1/targets'
+# -> ingest_api, serve_api, redpanda, clickhouse all health "up"
+curl --data-urlencode 'query=biq_events_accepted_total' http://localhost:9090/api/v1/query
+# -> 7709
+curl --data-urlencode 'query=histogram_quantile(0.95, sum(rate(biq_ingest_request_latency_seconds_bucket{endpoint="/track"}[5m])) by (le))' ...
+# -> 0.0282s p95
+curl --data-urlencode 'query=sum by (redpanda_group, redpanda_topic) (redpanda_kafka_max_offset - on(redpanda_topic, redpanda_partition) group_right redpanda_kafka_consumer_group_committed_offset)' ...
+# -> biq_clickhouse lag 0 (ClickHouse's Kafka-engine MV keeps draining it); biq-stream lag 13079
+#    (no stream_processor was running in this test, so that consumer group's lag just grows - expected)
+curl --data-urlencode 'query=ClickHouseMetrics_TCPConnection' ...
+# -> ClickHouse's own Prometheus endpoint confirmed live through Prometheus
+
+# Grafana proof (http://localhost:3000, anonymous viewer):
+curl http://localhost:3000/api/health            # -> {"database":"ok","version":"11.2.0"}
+curl http://localhost:3000/api/datasources       # -> Prometheus, uid "prometheus"
+curl http://localhost:3000/api/search            # -> uid "behavioriq", title "BehaviorIQ"
+curl 'http://localhost:3000/api/datasources/proxy/uid/prometheus/api/v1/query?query=biq_events_accepted_total'
+# -> 7709, proving the dashboard's own datasource proxy resolves real data
+
+pytest
+# -> 10 passed, with KAFKA_BOOTSTRAP/QDRANT_URL/WAREHOUSE all unset (default path unaffected)
+```
+
+Grafana dashboard: http://localhost:3000/d/behavioriq/behavioriq (anonymous viewer access, no login
+needed). Prometheus: http://localhost:9090.
+
 ## Upgrade 1 — Redpanda (Kafka) + Qdrant server — done
 
 - `KAFKA_BOOTSTRAP=localhost:19092` switches `biq/bus.py` from the local JSONL event log to a

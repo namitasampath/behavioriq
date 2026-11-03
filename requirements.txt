@@ -19,6 +19,7 @@ anthropic
 mlflow
 clickhouse-connect
 psycopg2-binary
+prometheus-client
 scipy
 matplotlib
 torch

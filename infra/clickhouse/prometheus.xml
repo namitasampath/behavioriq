@@ -1,0 +1,12 @@
+<clickhouse>
+    <!-- Upgrade 3 (observability): expose ClickHouse's built-in Prometheus exporter so the
+         "monitoring" compose profile's Prometheus can scrape it. No effect unless something
+         scrapes :9363; WAREHOUSE=clickhouse behaviour is unchanged. -->
+    <prometheus>
+        <endpoint>/metrics</endpoint>
+        <port>9363</port>
+        <metrics>true</metrics>
+        <events>true</events>
+        <asynchronous_metrics>true</asynchronous_metrics>
+    </prometheus>
+</clickhouse>

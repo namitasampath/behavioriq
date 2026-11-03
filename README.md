@@ -75,7 +75,7 @@ MLflow UI: `mlflow ui --backend-store-uri sqlite:///mlflow.db`
 | DuckDB | ClickHouse (facts) + PostgreSQL (dims) | `pip install clickhouse-connect psycopg2-binary`; `docker compose -f infra/docker-compose.yml --profile warehouse up -d --wait`; set `WAREHOUSE=clickhouse`; `warehouse.py` already uses it |
 | Qdrant local mode | Qdrant server | set `QDRANT_URL=http://localhost:6333` |
 | PSI/KS drift | Evidently AI | same statistics; Evidently adds HTML reports |
-| `/metrics` endpoints | Prometheus + Grafana | point Prometheus at `:8000/metrics` and `:8001/metrics` |
+| `/metrics` endpoints | Prometheus + Grafana | `biq/ingest_api.py` and `biq/serve_api.py` already serve `/metrics` via `prometheus-client`; `docker compose -f infra/docker-compose.yml --profile monitoring up -d --wait`; Prometheus at http://localhost:9090, Grafana (anonymous viewer, "BehaviorIQ" dashboard provisioned) at http://localhost:3000 |
 
 ## Honest limitations
 

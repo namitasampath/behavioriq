@@ -1,0 +1,91 @@
+{
+  "title": "BehaviorIQ",
+  "uid": "behavioriq",
+  "editable": true,
+  "schemaVersion": 39,
+  "time": { "from": "now-15m", "to": "now" },
+  "refresh": "5s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Events / sec (accepted vs rejected)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "rate(biq_events_accepted_total[1m])", "legendFormat": "accepted", "refId": "A" },
+        { "expr": "rate(biq_events_rejected_total[1m])", "legendFormat": "rejected", "refId": "B" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Rejected events (total)",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "biq_events_rejected_total", "refId": "A" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Ingest /track latency p95",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(biq_ingest_request_latency_seconds_bucket{endpoint=\"/track\"}[5m])) by (le))",
+          "legendFormat": "p95",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Kafka (Redpanda) consumer lag",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum by (redpanda_group, redpanda_topic) (redpanda_kafka_max_offset - on(redpanda_topic, redpanda_partition) group_right redpanda_kafka_consumer_group_committed_offset)",
+          "legendFormat": "{{redpanda_group}}/{{redpanda_topic}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Predictions by class",
+      "type": "piechart",
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum by (predicted_class) (biq_predictions_total)", "legendFormat": "{{predicted_class}}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Bandit action mix",
+      "type": "piechart",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum by (action) (biq_bandit_actions_total)", "legendFormat": "{{action}}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Copilot questions (incl. blocked queries)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "rate(biq_copilot_questions_total[5m])", "legendFormat": "questions/sec", "refId": "A" },
+        { "expr": "rate(biq_copilot_blocked_queries_total[5m])", "legendFormat": "blocked queries/sec", "refId": "B" }
+      ]
+    }
+  ]
+}
