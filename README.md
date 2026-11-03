@@ -95,7 +95,7 @@ source data can't give us (missing event types, no device/referrer, no hidden pe
 | SQLite + Parquet feature store | Feast with Redis online store | `FEATURE_COLUMNS` becomes a Feast FeatureView |
 | DuckDB | ClickHouse (facts) + PostgreSQL (dims) | `pip install clickhouse-connect psycopg2-binary`; `docker compose -f infra/docker-compose.yml --profile warehouse up -d --wait`; set `WAREHOUSE=clickhouse`; `warehouse.py` already uses it |
 | Qdrant local mode | Qdrant server | set `QDRANT_URL=http://localhost:6333` |
-| PSI/KS drift | Evidently AI | same statistics; Evidently adds HTML reports |
+| PSI/KS drift | Evidently AI | `uv venv --python 3.11 .venv-evidently; uv pip install -r requirements-evidently.txt --python .venv-evidently/Scripts/python.exe` (separate venv - Evidently 0.7.23 is incompatible with this project's pandas 3.1.0); set `BIQ_EVIDENTLY=1`; `biq/mlops.py` already shells out to it for an HTML report + dataset-drift verdict per scenario, alongside the existing PSI/domain-classifier result |
 | `/metrics` endpoints | Prometheus + Grafana | `biq/ingest_api.py` and `biq/serve_api.py` already serve `/metrics` via `prometheus-client`; `docker compose -f infra/docker-compose.yml --profile monitoring up -d --wait`; Prometheus at http://localhost:9090, Grafana (anonymous viewer, "BehaviorIQ" dashboard provisioned) at http://localhost:3000 |
 | Hosted Claude API copilot | Free, local LLM (Ollama) | `ollama pull qwen2.5:3b`; set `BIQ_LLM_PROVIDER=ollama`; `copilot.py`'s `ask_ollama()` already uses it through Ollama's OpenAI-compatible endpoint, with the same tools/guardrails/grounding check |
 

@@ -265,6 +265,49 @@ So the residual failures are a weighting bug, two wrong-aggregation-level mistak
 and one data-values mistake the schema block structurally cannot address - a materially different (and
 smaller) failure surface than v1's dominant "picked the wrong view entirely" pattern.
 
+## Upgrade 7 - Evidently AI drift reports (honest agreement result)
+
+Evidently 0.7.23 (current on PyPI) cannot be imported against this project's pandas 3.1.0 - it still
+calls an internal pandas API (`pandas.core.dtypes.common.infer_dtype_from_object`) that pandas
+removed in the 3.x line, and no newer Evidently release exists to fix this. Rather than downgrading
+pandas for the whole project, Evidently runs in a separate `.venv-evidently` environment (pandas
+`>=2.0,<3`, see `requirements-evidently.txt`), invoked by `biq/mlops.py::evidently_report()` as a
+subprocess running `biq/evidently_reports.py`. `BIQ_EVIDENTLY=1` turns this on; unset, `run_all.py`
+and `pytest` behave exactly as before (no subprocess calls, no new files, new drift-table columns
+blank). Our PSI + domain-classifier rule stays the pass/fail decision for both drift experiments;
+Evidently's own dataset-drift verdict (`DataDriftPreset`, share of drifted columns >= 0.5, its own
+preset default - not our PSI>0.2 threshold) is recorded alongside it, honestly, including where the
+two disagree.
+
+### Result: agreement with our rule
+
+| Run | Scenarios | Evidently agrees with our rule |
+| --- | --- | --- |
+| Simulated (`reports/stage10_drift.md`, `reports/evidently/`) | 6 | **2/6** |
+| REES46 real data (`reports/rees46/stage10_drift.md`, `reports/rees46/evidently/`) | 5 | **3/5** |
+
+This is reported as-is, not tuned to make the two detectors agree. Evidently's dataset-drift test
+(share of drifted columns over a flat 50% threshold) is a coarser, stricter-in-a-different-way rule
+than ours (any one feature's PSI > 0.2, OR a domain classifier ROC-AUC > 0.6 - built specifically to
+catch mixture shifts that move every feature only slightly). On the simulated scenarios, Evidently
+missed 4 of 5 injected drifts that our rule caught (`mobile surge`, `deal-hunter influx`, `slow
+sessions`, `abandoner wave`) - each flagged 1 to 4 of 9 columns individually (shares 0.111-0.444),
+under its 50% dataset-level cutoff, even though the shifted feature(s) were large and real (e.g.
+`duration_s` tripled in `slow sessions`, PSI 1.05; `deal-hunter influx` came closest to Evidently's
+own threshold at 4/9 columns, share 0.444). Both detectors agreed on the `control` (no false alarm)
+and `comparer surge` (5/9 columns, share 0.556, just over the 50% line) scenarios. The real-data run shows the same pattern in miniature: Evidently and our rule agree
+on the control and on the two scenarios where the domain classifier's AUC stayed under 0.6
+(`cart-heavy`, `category mix`), and disagree on the two where our multivariate check caught a
+shift spread thinly across several features.
+
+**Why this isn't a bug in either detector**: Evidently's `DataDriftPreset` is a per-column voting
+rule (count how many individual columns look different); our rule adds a domain-classifier check
+specifically because a shift that nudges several correlated features slightly can be invisible to
+any single-column test yet still be a real, detectable distributional change - which is exactly the
+disagreement pattern observed here. Evidently's own HTML reports show its per-column PSI/K-S
+breakdown for every scenario (scenario selector on the dashboard's Monitoring tab), so both views are
+available side by side rather than one silently overriding the other.
+
 ## Likely viva questions
 - *Why a time-based split?* Random splits let the model see the future and inflate scores.
 - *How do you stop label leakage?* Inputs end before the first purchase/exit event (`prediction_prefix`).
@@ -280,4 +323,10 @@ smaller) failure surface than v1's dominant "picked the wrong view entirely" pat
   touching the guardrail, grounding check or tools - see the schema-in-prompt follow-up under
   Upgrade 6. The residual failures are weighting/aggregation-level mistakes and one data-*value*
   mistake (a segment label format), which schema structure alone can't fix.
+- *Why does Evidently disagree with your own drift rule on most scenarios?* It votes per column
+  (dataset drift = >=50% of columns individually flagged); ours adds a domain-classifier check so a
+  shift spread thinly across several correlated features - which still produces a real, detectable
+  distributional change - isn't invisible just because no single column crosses Evidently's
+  per-column threshold on its own. See Upgrade 7; both detectors' full output ship side by side
+  (table + Evidently's own HTML report) rather than one silently overriding the other.
 - *How is the copilot kept honest?* SQL is limited to whitelisted views, rows from fewer than 20 sessions are suppressed, and every number in an answer is checked against tool output.

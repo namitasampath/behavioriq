@@ -52,3 +52,11 @@ OLLAMA_BASE_URL = os.getenv("BIQ_OLLAMA_URL", "http://localhost:11434/v1")
 LLM_MODEL = os.getenv("BIQ_LLM_MODEL", "qwen2.5:3b" if LLM_PROVIDER == "ollama" else "claude-haiku-5-5")
 SEED = int(os.getenv("BIQ_SEED", "42"))
 N_SESSIONS = int(os.getenv("BIQ_N_SESSIONS", "6000"))
+
+# Evidently AI drift reports (Upgrade 7): BIQ_EVIDENTLY=1 enables generating an Evidently HTML
+# report + JSON summary per drift scenario, alongside the existing PSI/domain-classifier drift
+# tables in biq/mlops.py. Evidently 0.7.23 is incompatible with this project's pandas 3.1.0 (it
+# calls an internal pandas API pandas 3 removed), so it runs out-of-process in a separate venv -
+# see requirements-evidently.txt - rather than being installed into this project's venv.
+EVIDENTLY_ENABLED = os.getenv("BIQ_EVIDENTLY", "") == "1"
+EVIDENTLY_PYTHON = os.getenv("BIQ_EVIDENTLY_PYTHON", str(ROOT / ".venv-evidently" / "Scripts" / "python.exe"))

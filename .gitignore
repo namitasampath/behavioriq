@@ -1,4 +1,5 @@
 .venv/
+.venv-evidently/
 __pycache__/
 *.pyc
 data/

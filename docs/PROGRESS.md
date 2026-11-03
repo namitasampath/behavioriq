@@ -1,5 +1,116 @@
 # Production upgrade progress
 
+## Upgrade 7 — Evidently AI drift reports — done (2026-11-04)
+
+`BIQ_EVIDENTLY=1` switches on Evidently AI HTML drift reports + a dataset-drift verdict alongside
+the existing PSI/domain-classifier drift tables in `biq/mlops.py`. With it unset, `run_all.py` and
+`pytest` behave exactly as before.
+
+### Blocker found and resolved: Evidently 0.7.23 vs. pandas 3
+
+Evidently 0.7.23 (latest on PyPI) failed to import in the main project venv:
+`ImportError: cannot import name 'infer_dtype_from_object' from 'pandas.core.dtypes.common'` -
+Evidently still calls an internal pandas API that pandas removed in the 3.x line, and this project's
+venv runs pandas 3.1.0 (unpinned in `requirements.txt`). No newer Evidently release exists to fix
+this. Rather than downgrading pandas for every pipeline stage, Evidently runs in a **separate,
+isolated venv**:
+
+- **`requirements-evidently.txt`** (new): pins `evidently==0.7.23`, `pandas>=2.0,<3`, `pyarrow`.
+  `uv venv --python 3.11 .venv-evidently` + `uv pip install -r requirements-evidently.txt --python
+  .venv-evidently/Scripts/python.exe` installs cleanly (`evidently 0.7.23` imports fine against
+  `pandas 2.3.3`, confirmed). `.venv-evidently/` is gitignored. The main venv/`requirements.txt`/
+  pandas are untouched (confirmed by uninstalling the first, failed main-venv install - evidently
+  plus 32 transitive deps, and a `plotly` downgrade it pulled in - and rerunning `pytest`: 10 passed,
+  unaffected).
+- **`biq/evidently_reports.py`** (new): a standalone CLI script, runnable only by
+  `.venv-evidently`'s python, never imported by the main venv. Reads reference/current feature
+  parquet files, builds `evidently.Report([evidently.presets.DataDriftPreset(columns=DRIFT_FEATURES,
+  drift_share=0.5)])`, runs it (`Dataset.from_pandas` + `Report.run()` → `Snapshot`), writes the HTML
+  report (`snapshot.save_html()`) and a JSON summary (`dataset_drift`, `share_drifted_columns` - from
+  the `DriftedColumnsCount` metric's `{"count", "share"}` value; `dataset_drift = share >= 0.5`,
+  confirmed against Evidently's own generated test verdict, not guessed). The exact API (`Report`,
+  `Dataset`, `DataDefinition`, `presets.DataDriftPreset`, `Snapshot.dict()/.save_html()`) was read
+  from the installed 0.7.23 package source and confirmed with a live test run, not assumed from an
+  older/remembered Evidently API - the module docstring records what was checked and why.
+- **`biq/mlops.py`**: new `evidently_report()` shells out to `.venv-evidently`'s python running that
+  script per scenario (writing reference/current parquet to a temp dir), returning `None` with a
+  one-line, non-fatal skip message when `BIQ_EVIDENTLY` isn't `"1"` or `.venv-evidently` doesn't
+  exist - so `drift_experiment()`/`real_data_drift_experiment()` behave exactly as before by default.
+  `_evidently_row()` adds three columns to both functions' drift tables: `evidently_drift` (its own
+  dataset-drift verdict), `evidently_share_drifted`, and `agrees_with_our_rule` (whether that verdict
+  matches our existing PSI/domain-classifier `detected` flag) - our rule stays the actual pass/fail
+  decision; Evidently is reported alongside it, not substituted in. `_evidently_footer()` appends an
+  honest agreement summary to `stage10_drift.md`. HTML reports land in `config.REPORTS / "evidently"`
+  - which, because `config.REPORTS` is itself redirected by `BIQ_REPORTS` for the REES46 pipeline
+    (`run_all.py --dataset rees46`), resolves to `reports/evidently/` for the simulated pipeline and
+    `reports/rees46/evidently/` for REES46 with no special-casing needed.
+- **`biq/config.py`**: added `EVIDENTLY_ENABLED` (`BIQ_EVIDENTLY`, default off) and `EVIDENTLY_PYTHON`
+  (`BIQ_EVIDENTLY_PYTHON`, default `.venv-evidently/Scripts/python.exe`).
+- **`dashboard/app.py`**: Monitoring tab gained a scenario selector (`st.selectbox`) over
+  `config.REPORTS / "evidently" / *.html`, embedding the chosen report via
+  `streamlit.components.v1.html(..., height=800, scrolling=True)`; shows a setup hint when no reports
+  exist yet. Everything else on the tab (PSI table, bar chart, copilot report) is unchanged.
+
+### Honest result: Evidently vs. our PSI/domain-classifier rule
+
+Our rule stays the pass/fail decision in both experiments; Evidently's own dataset-drift verdict
+(share of drifted columns >= 0.5, its own preset default) is reported alongside it, honestly:
+
+| Run | Scenarios | Evidently agrees with our rule |
+| --- | --- | --- |
+| Simulated (`reports/stage10_drift.md`) | 6 | **2/6** |
+| REES46 real data (`reports/rees46/stage10_drift.md`) | 5 | **3/5** |
+
+Evidently's per-column voting rule missed 4/5 injected drifts our rule caught in the simulated run
+(each shifted only 1-4 of 9 columns individually - under its 50% cutoff - even where the shift was
+large and real, e.g. `duration_s` tripling with PSI 1.05 in `slow sessions`). This is the expected,
+honest disagreement pattern, not a bug: our domain-classifier check exists specifically to catch
+shifts spread thinly across several correlated features, which a per-column vote can structurally
+miss. Full breakdown and why: `docs/RESULTS_FOR_REPORT.md` ("Upgrade 7").
+
+### Verification run (2026-11-04)
+
+```
+uv pip install evidently --python .venv/Scripts/python.exe
+# -> installs evidently 0.7.23 cleanly, but downgrades plotly 7.1.0 -> 5.24.1
+python -c "import evidently"
+# -> ImportError: cannot import name 'infer_dtype_from_object' from 'pandas.core.dtypes.common'
+#    (pandas 3.1.0 in this venv; confirmed no newer evidently release exists on PyPI)
+uv pip uninstall evidently <32 transitive deps> --python .venv/Scripts/python.exe
+uv pip install "plotly==7.1.0" --python .venv/Scripts/python.exe   # restore
+pytest
+# -> 10 passed (main venv/requirements.txt/pandas confirmed untouched)
+
+uv venv --python 3.11 .venv-evidently
+uv pip install -r requirements-evidently.txt --python .venv-evidently/Scripts/python.exe
+# -> evidently 0.7.23 + pandas 2.3.3 (not pandas 3)
+.venv-evidently/Scripts/python.exe -c "import evidently; print(evidently.__version__)"
+# -> OK 0.7.23
+
+BIQ_EVIDENTLY=1 python -c "from biq import mlops; mlops.drift_experiment()"
+# -> 6/6 scenarios ran Evidently successfully; reports/evidently/*.html (6 files, ~4MB each);
+#    stage10_drift.md table includes evidently_drift/evidently_share_drifted/agrees_with_our_rule;
+#    footer: "Evidently AI agreement: 2/6 scenarios ... matched our PSI/domain-classifier rule"
+python -c "from biq import mlops; mlops.drift_experiment()"   # BIQ_EVIDENTLY unset
+# -> identical PSI/domain-classifier table; evidently_* columns blank; skip message printed;
+#    confirms default behaviour is unchanged
+
+BIQ_EVIDENTLY=1 BIQ_DATA=.../data/rees46 BIQ_REPORTS=.../reports/rees46 \
+  python -c "from biq import mlops; mlops.real_data_drift_experiment()"
+# -> 5/5 scenarios ran; reports/rees46/evidently/*.html (5 files); agreement footer: "3/5 scenarios"
+#    (config.REPORTS redirection alone put the files under reports/rees46/evidently/, as intended)
+
+pytest
+# -> 10 passed, BIQ_EVIDENTLY unset (default path unaffected)
+
+# Dashboard, live (streamlit run dashboard/app.py, QDRANT_URL set to avoid the pre-existing
+# embedded-Qdrant file-lock limitation noted in Upgrade 6 - unrelated to this upgrade):
+# Monitoring tab -> scenario selector lists all 6 simulated scenarios; selecting
+# "comparer_surge_85_heavy_comparers" embeds its Evidently HTML report showing "Dataset Drift is
+# detected ... 5 Drifted Columns ... 0.556 Share of Drifted Columns", matching the stage10 table row;
+# switching to another scenario re-embeds its own report - confirmed via claude-in-chrome screenshots
+```
+
 ## Upgrade 6 — local LLM copilot via Ollama — done (2026-11-03)
 
 `BIQ_LLM_PROVIDER=ollama` switches `biq/copilot.py::ask()` to `ask_ollama()`, which talks to a local

@@ -12,6 +12,7 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import plotly.express as px  # noqa: E402
 import streamlit as st  # noqa: E402
+import streamlit.components.v1 as components  # noqa: E402
 
 from biq import config  # noqa: E402
 from biq.warehouse import connect  # noqa: E402
@@ -199,5 +200,17 @@ with tabs[5]:
         fig.add_hline(y=0.2, line_dash="dash", line_color=COL["abandon"], annotation_text="PSI 0.2 drift threshold")
         fig.update_layout(height=380, title="Population stability per feature and scenario", margin=dict(l=0, r=0, t=40, b=0))
         st.plotly_chart(fig, width="stretch")
+
+    evidently_dir = config.REPORTS / "evidently"
+    evidently_reports = sorted(evidently_dir.glob("*.html")) if evidently_dir.exists() else []
+    if evidently_reports:
+        st.markdown("#### Evidently AI data-drift report")
+        choice = st.selectbox("Scenario", [p.stem for p in evidently_reports])
+        html = (evidently_dir / f"{choice}.html").read_text(encoding="utf-8")
+        components.html(html, height=800, scrolling=True)
+    else:
+        st.caption("No Evidently AI reports yet - set `BIQ_EVIDENTLY=1` with `.venv-evidently` set "
+                   "up (see `requirements-evidently.txt`) and re-run the mlops stage to generate them.")
+
     st.markdown(report("stage9_copilot.md"))
     st.caption("Experiment tracking and the model registry: run `mlflow ui --backend-store-uri sqlite:///mlflow.db`.")
