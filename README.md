@@ -65,6 +65,20 @@ Serving API (intent, next-best action, SHAP, copilot):
 
 MLflow UI: `mlflow ui --backend-store-uri sqlite:///mlflow.db`
 
+## Running on real data (REES46)
+
+```powershell
+python run_all.py --dataset rees46 --sessions 30000
+```
+
+Replays the REES46 "eCommerce behavior data from multi category store" CSV
+(`data/external/*.csv`) through `biq/replay.py` instead of the simulator - same stages (minus
+`bandit`, which needs counterfactual outcomes a logged dataset doesn't have, and `copilot`, not
+run for this dataset), writing to `data/rees46/`, `reports/rees46/`, `artifacts/rees46/` without
+touching the simulated outputs. See `docs/CONTRACTS.md` ("Real-data replay (REES46)") for what the
+source data can't give us (missing event types, no device/referrer, no hidden personas), and
+`docs/RESULTS_FOR_REPORT.md` ("Upgrade 5") for the full comparison against the simulated run.
+
 ## Production upgrade (what the report's architecture swaps in)
 
 | Laptop edition | Production component | How to switch |
@@ -79,7 +93,13 @@ MLflow UI: `mlflow ui --backend-store-uri sqlite:///mlflow.db`
 
 ## Honest limitations
 
-* Most data is synthetic. The simulator's personas overlap and it adds noise, but conclusions need confirming on real data (e.g. the REES46 Kaggle dataset).
+* Most data is synthetic. The simulator's personas overlap and it adds noise. Confirmed against
+  real data: `python run_all.py --dataset rees46` (see above) replays the REES46 Kaggle dataset -
+  the representation/retrieval ranking holds (count-based features beat the learned contrastive
+  embedding on both), but REES46's outcome mix is far more skewed (89.5% browse-only vs. the
+  simulator's balanced 3-way split) and it has no device/referrer/review/compare/search events at
+  all, so several conclusions (device segmentation, the early-prediction curve, anything touching
+  consideration events) don't transfer - see `docs/RESULTS_FOR_REPORT.md`.
 * The bandit can only be evaluated in simulation, because logged data does not show the outcomes of actions that were not taken.
 * Heavy infrastructure (Kafka, Flink, Feast, ClickHouse) is replaced by in-process equivalents, as listed above.
 * In `WAREHOUSE=clickhouse` mode, `fact_user_events` is append-only across warehouse rebuilds (never truncated, unlike DuckDB's full `CREATE OR REPLACE TABLE`) because a ClickHouse Kafka-engine materialized view keeps inserting into it continuously; `ReplacingMergeTree(ingested_at)` + `FINAL` dedup duplicate `event_id`s at query time instead. Raw (pre-merge) row count grows with every rebuild as a result.

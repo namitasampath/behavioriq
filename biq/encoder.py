@@ -231,8 +231,12 @@ def baseline_embed(texts_train: list[str], texts_all: list[str]) -> tuple[np.nda
         from sklearn.feature_extraction.text import TfidfVectorizer
         from sklearn.preprocessing import normalize
         vec = TfidfVectorizer(ngram_range=(1, 3), token_pattern=r"[^ ]+").fit(texts_train)
-        svd = TruncatedSVD(DIM, random_state=config.SEED).fit(vec.transform(texts_train))
-        return normalize(svd.transform(vec.transform(texts_all))), "TF-IDF(1-3 gram) + SVD-64 (fallback)"
+        X_train = vec.transform(texts_train)
+        # a low-diversity event vocabulary (e.g. real data with far fewer event types than the
+        # simulator) can yield fewer than DIM distinct n-gram features; SVD can't exceed that
+        n_comp = max(1, min(DIM, X_train.shape[1] - 1))
+        svd = TruncatedSVD(n_comp, random_state=config.SEED).fit(X_train)
+        return normalize(svd.transform(vec.transform(texts_all))), f"TF-IDF(1-3 gram) + SVD-{n_comp} (fallback)"
 
 
 class EncoderBundle:

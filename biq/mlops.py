@@ -61,7 +61,7 @@ def session_features(events: pd.DataFrame) -> pd.DataFrame:
     for sid, g in events.groupby("session_id", sort=False):
         ts = g.timestamp.to_numpy()
         gaps = np.r_[0, np.diff(ts).astype("timedelta64[ms]").astype(float) / 1000]
-        rows.append(aggregate_features(g.event_type.tolist(), gaps.tolist(), g.device.iloc[0]))
+        rows.append({**aggregate_features(g.event_type.tolist(), gaps.tolist(), g.device.iloc[0]), "session_id": sid})
     return pd.DataFrame(rows)
 
 
@@ -149,6 +149,94 @@ def drift_experiment(n: int = 1500):
               f"Detected {int(inj.detected.sum())}/{len(inj)} injected drifts; "
               f"false alarm on control: {bool(df[~df.injected].detected.iloc[0])}.\n\n"
               + df.round(3).to_markdown(index=False) + "\n\nRule: drift when any monitored feature has PSI > 0.2 (univariate) OR a domain classifier separates live from training traffic with ROC-AUC > 0.6 (multivariate; catches mixture shifts that move each feature only slightly).\n")
+    (config.REPORTS / "stage10_drift.md").write_text(report, encoding="utf-8")
+    pd.concat(detail).to_csv(config.REPORTS / "stage10_drift_detail.csv", index=False)
+    print(report)
+
+
+# ---------------------------------------------------------------- drift, real (non-simulated) data
+def _weighted_resample(feats: pd.DataFrame, weight: np.ndarray, n: int, rng: np.random.Generator) -> pd.DataFrame:
+    p = weight / weight.sum()
+    idx = rng.choice(len(feats), size=n, replace=True, p=p)
+    return feats.iloc[idx].reset_index(drop=True)
+
+
+def _primary_category(events: pd.DataFrame) -> pd.Series:
+    """Most frequent category per session (for the category-mix-shift scenario); sessions with no
+    categorised event map to 'none'."""
+    cat = events.dropna(subset=["category"]).groupby("session_id")["category"] \
+        .agg(lambda s: s.value_counts().idxmax())
+    return cat.rename("primary_category")
+
+
+def real_data_drift_experiment(seed: int = 1000):
+    """Drift detection for a real (logged, not simulated) dataset. Reference = train-split
+    sessions; control = held-out test-split sessions AS LOGGED (should NOT be flagged - it's the
+    sanity check that two slices of the same real traffic don't look drifted); injected scenarios
+    = the SAME test-split sessions resampled or perturbed to synthesize a known shift.
+
+    This deliberately never compares real traffic against `biq.simulator` output: the simulator's
+    fabricated event types (review/compare), personas and dwell distribution differ from any real
+    log structurally, so EVERY scenario - including a true no-shift control - would come back
+    "drifted" without saying anything about whether the detector catches a genuine shift.
+    """
+    raw = pd.read_parquet(config.RAW_EVENTS)
+    split = pd.read_parquet(config.DATA / "sessions_split.parquet")
+    train_ids = set(split.session_id[split.split == "train"])
+    test_ids = set(split.session_id[split.split == "test"])
+    ref = session_features(raw[raw.session_id.isin(train_ids)])
+    test = session_features(raw[raw.session_id.isin(test_ids)]).reset_index(drop=True)
+    test = test.merge(_primary_category(raw[raw.session_id.isin(test_ids)]), on="session_id", how="left")
+    test["primary_category"] = test["primary_category"].fillna("none")
+    n = len(test)
+    rng = np.random.default_rng(seed)
+
+    device_varies = test["is_mobile"].nunique() > 1
+    if device_varies:
+        device_w = np.where(test.is_mobile == 1, 4.0, 1.0)
+        device_label = "mobile-heavy resample (4x weight on mobile sessions)"
+    else:
+        long_thr = test.event_count.median()
+        device_w = np.where(test.event_count > long_thr, 4.0, 1.0)
+        device_label = "long-session-heavy resample (4x weight on above-median-length sessions; no device signal to resample on)"
+    cart_w = np.where(test.n_add_to_cart >= 1, 4.0, 1.0)
+    top_cat = test.primary_category.value_counts().idxmax()
+    cat_w = np.where(test.primary_category == top_cat, 4.0, 1.0)
+    dwell_cur = test.copy()
+    dwell_cur["duration_s"] *= 3
+    dwell_cur["mean_gap_s"] *= 3
+
+    scenarios = {
+        "control (held-out test traffic, no shift)": test,
+        device_label: _weighted_resample(test, device_w, n, rng),
+        "cart-heavy resample (4x weight on sessions with >=1 add_to_cart)": _weighted_resample(test, cart_w, n, rng),
+        "dwell/time-gaps x3 (duration_s, mean_gap_s scaled)": dwell_cur,
+        f"category mix shift (4x weight on top category '{top_cat}')": _weighted_resample(test, cat_w, n, rng),
+    }
+    rows, detail = [], []
+    for name, cur in scenarios.items():
+        injected = not name.startswith("control")
+        rep = drift_report(ref, cur)
+        auc = domain_classifier_auc(ref, cur)
+        flagged = bool(rep.drifted.any()) or auc > 0.6
+        rows.append(dict(scenario=name, injected=injected, drifted_features=int(rep.drifted.sum()),
+                         max_psi=rep.psi.max(), top_feature=rep.sort_values("psi").feature.iloc[-1],
+                         domain_auc=auc, detected=flagged))
+        detail.append(rep.assign(scenario=name))
+    df = pd.DataFrame(rows)
+    inj = df[df.injected]
+    report = (
+        "# Stage 10 - Drift detection, real data (PSI + KS against the training-split reference)\n\n"
+        "Reference = train-split sessions; every scenario below is built from the SAME held-out "
+        "test-split sessions (no `biq.simulator` traffic is used - comparing real logs against "
+        "simulated traffic is always flagged as 'drifted', which tests nothing about the detector).\n\n"
+        f"Detected {int(inj.detected.sum())}/{len(inj)} injected drifts; "
+        f"false alarm on control: {bool(df[~df.injected].detected.iloc[0])}.\n\n"
+        + df.round(3).to_markdown(index=False)
+        + "\n\nRule: drift when any monitored feature has PSI > 0.2 (univariate) OR a domain "
+          "classifier separates live from training traffic with ROC-AUC > 0.6 (multivariate; "
+          "catches mixture shifts that move each feature only slightly).\n"
+    )
     (config.REPORTS / "stage10_drift.md").write_text(report, encoding="utf-8")
     pd.concat(detail).to_csv(config.REPORTS / "stage10_drift_detail.csv", index=False)
     print(report)

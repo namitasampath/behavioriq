@@ -1,5 +1,93 @@
 # Production upgrade progress
 
+## Upgrade 5 — REES46 real-data replay — done (2026-11-03)
+
+`python run_all.py --dataset rees46 [--sessions N]` replays the REES46 "eCommerce behavior data
+from multi category store" CSV (`data/external/2019-Oct.csv`) through the same pipeline instead of
+`biq.simulator`, writing to `data/rees46/`, `reports/rees46/`, `artifacts/rees46/` (via
+`BIQ_DATA`/`BIQ_REPORTS`/`BIQ_ARTIFACTS`) - the simulated outputs under `data/`, `reports/`,
+`artifacts/` are never touched, and with `--dataset` unset (default `simulated`) `run_all.py` and
+`pytest` behave exactly as before.
+
+- **`biq/replay.py`** (new): maps REES46's `view`/`cart`/`remove_from_cart`/`purchase` onto
+  `product_view`/`add_to_cart`/`remove_from_cart`/`purchase`, `category_code`'s top-level token
+  onto `category`, builds `page` from `product_id`, and salts+SHA-256-hashes `user_id` and the
+  session grouping key so nothing traces back to the source id. The 5.7GB CSV (42.4M rows, 9.24M
+  distinct `user_session` ids) is never loaded as one block: a reservoir sample of N session ids is
+  taken entirely inside DuckDB's out-of-core CSV reader, then only that sample's rows are pulled -
+  this is the "read in chunks" step, done by a columnar engine instead of a hand-rolled chunk loop.
+  REES46's own `user_session` grouping is discarded and **re-sessionised with OUR rule** (30 min
+  inactivity or a purchase closes a session); `docs/RESULTS_FOR_REPORT.md` has the measured split
+  rate. No device/referrer column exists in REES46 at all, so every event is stamped
+  `device="desktop"`, `referrer="direct"` as a documented placeholder (see `docs/CONTRACTS.md`).
+- **`biq/mining.py`**: `run()`'s ARI-vs-persona row is now conditional on `config.TRUTH` existing -
+  real data has no hidden persona label, so it's omitted instead of crashing on a missing file.
+- **`biq/mlops.py`**: added `real_data_drift_experiment()`. The first version of this upgrade
+  reused `drift_experiment()`, which compares the training reference against `biq.simulator`
+  traffic - that is meaningless on real data, because REES46 and the simulator differ structurally
+  regardless of any injected shift, so it flagged *every* scenario as drifted, including a true
+  no-shift control (false alarm on control = True). `real_data_drift_experiment()` instead uses
+  only real traffic: reference = train split, control = the held-out test split as-is, and four
+  injected scenarios are the SAME test-split sessions resampled/perturbed (long-session-heavy
+  resample as a fallback for "mobile-heavy" - REES46 has no device signal to resample on;
+  cart-heavy 4x resample; dwell/time-gaps x3; category-mix 4x resample on the top category).
+  `drift_experiment()` itself is untouched and still runs for the simulated pipeline.
+- **`biq/encoder.py` / `biq/intent.py`**: the TF-IDF+SVD-64 text baseline assumed at least 64
+  distinct n-gram features; REES46's event vocabulary is small enough (3 behavioural event types
+  observed) that the train split can have far fewer. Both now cap `n_components` at
+  `min(DIM, n_features - 1)` instead of hardcoding 64 - a real-data robustness fix, not a REES46
+  special case.
+- **`biq/retrieval.py`**: Qdrant collection names are now `f"{COLLECTION_PREFIX}_custom"` /
+  `f"{COLLECTION_PREFIX}_baseline"` (`BIQ_QDRANT_PREFIX`, default `"biq"`, unchanged). `run_all.py`
+  sets it to `"biq_rees46"` for the real-data pipeline so a run against a *shared Qdrant server*
+  (`QDRANT_URL` set) can never overwrite the simulated collections; local-mode Qdrant was already
+  isolated via the separate `BIQ_DATA` path.
+- **`run_all.py`**: new `--dataset {simulated,rees46}` and `--sessions` flags; `REES46_STAGES` =
+  `replay, stream, mining, warehouse, encoder, retrieval, intent, bandit (skipped with a message -
+  no counterfactual outcomes in logged data), mlops (drift only, not MLflow registration)`. Copilot
+  isn't run for this dataset. The original `STAGES` dict (used by `--dataset simulated`, the
+  default) is unchanged.
+
+### Verification run (2026-11-03)
+
+```
+python run_all.py --dataset rees46 --sessions 30000
+# -> replay:    sampled 30,000 of 9,244,421 source sessions -> 137,327 raw rows
+#    re-sessionised: 30,000 source -> 32,066 final sessions; 1,657 (5.5%) split
+#    wrote 137,327 events / 32,066 sessions / 27,236 catalogue products
+#    event_type counts: product_view 131,871, add_to_cart 3,018, purchase 2,438
+#      (this file has no remove_from_cart rows at all)
+# -> stream:    137,327 events -> 32,066 closed sessions, 0 lost; out-of-order 59
+# -> mining:    HDBSCAN found 14 clusters (noise 0.3%), incl. a 860-session "cart abandoners"
+#               cluster at 62% abandonment vs ~5% elsewhere; no ari_vs_persona (no ground truth)
+# -> warehouse: 137,327 events, 32,066 sessions, 8 views; spot check 10/10
+# -> encoder:   vocab 7 tokens (train 22,447 / val 4,810 / test 4,809); baseline fallback
+#               auto-capped to SVD-14 (see biq/encoder.py fix above); neighbour-outcome agreement:
+#               custom 0.829, baseline 0.912, random 0.820 (pretrain stopped after 15 epochs)
+# -> retrieval: indexed 22,447 sessions into biq_rees46_custom / biq_rees46_baseline;
+#               precision@10 0.894 / 0.886; abandoning-neighbour share 0.30 (pool base rate 0.03)
+# -> intent:    full-prefix macro-F1: A 0.669, B 0.708, B+R 0.708, C_base 0.711, C 0.588, C+R 0.573
+#               (same ranking as the simulator run: count/hand-crafted features beat the learned
+#               contrastive embedding; retrieval augmentation is not statistically significant)
+# -> bandit:    skipped with the explanatory message (see run_all.py::stage_bandit_skip)
+# -> mlops:     real_data_drift_experiment(): 2/4 injected drifts detected, NO false alarm on
+#               control (long-session-heavy and dwell-x3 caught; cart-heavy and category-mix missed
+#               - see docs/RESULTS_FOR_REPORT.md for why both misses are explainable, not bugs)
+# -> All done in 86.3 min (plus a separate 59s re-run of just --only mlops after the drift-method
+#    fix landed mid-run; nothing upstream of mlops needed re-running)
+
+pytest
+# -> 10 passed, BIQ_DATA/BIQ_REPORTS/BIQ_ARTIFACTS/KAFKA_BOOTSTRAP/QDRANT_URL/WAREHOUSE all unset
+#    (default simulated path unaffected)
+
+python run_all.py --only warehouse        # spot-check the simulated pipeline is still untouched
+# -> warehouse built: 74,513 events, 6,000 sessions, 8 views -> data/warehouse.duckdb (unchanged)
+```
+
+Full tables and the side-by-side comparison with the simulated run: `docs/RESULTS_FOR_REPORT.md`
+("Upgrade 5" section). What REES46 can and can't give us (missing event types, no device/referrer,
+no hidden personas): `docs/CONTRACTS.md` ("Real-data replay (REES46)" section).
+
 ## Upgrade 3 — Prometheus + Grafana observability — done (2026-11-03)
 
 The `monitoring` compose profile (Prometheus + Grafana) is purely additive: with it not started, the

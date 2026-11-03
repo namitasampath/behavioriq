@@ -49,6 +49,135 @@ time-based 70/15/15 split). Every number below is reproducible; full tables are 
 - The text baseline is TF-IDF + SVD unless `sentence-transformers` is installed (it then uses MiniLM).
 - The laptop edition substitutes in-process equivalents for Kafka/Flink/Feast/ClickHouse (README table).
 
+## Upgrade 5 - REES46 real-data replay vs. the simulator
+
+`python run_all.py --dataset rees46` replays the REES46 "eCommerce behavior data from multi
+category store" Oct-2019 CSV (`data/external/2019-Oct.csv`, 42.4M rows, 9,244,421 distinct
+`user_session` ids) through `biq/replay.py` instead of the simulator. 30,000 source sessions were
+sampled (137,327 raw rows) and **re-sessionised with OUR rule** (30 min inactivity or a purchase
+closes a session) instead of trusting REES46's own session id: **1,657 of the 30,000 source
+sessions (5.5%) were split into more than one final session**, giving 32,066 final sessions /
+137,327 events. See `docs/CONTRACTS.md` for what REES46 can't give us (no search/click/scroll/
+hover/review/compare/checkout/exit events, no device/referrer, no hidden personas) and how that's
+handled. Full output: `reports/rees46/`.
+
+### Outcome mix: REES46 is far more skewed than the simulator
+
+| Dataset | browse | abandon | purchase | mean events/session |
+| --- | --- | --- | --- | --- |
+| Simulated (6,000 sessions) | 37.2% | 36.6% | 26.2% | ~12 |
+| REES46 (32,066 sessions) | 89.5% | 2.9% | 7.6% | 4.3 (median 2) |
+
+REES46 sessions are short and overwhelmingly just a `product_view` or two with no `add_to_cart` -
+the simulator's Markov chain spends far more of each session in the cart/compare/checkout funnel,
+because it was built to generate a balanced, information-rich outcome mix. Real traffic is not
+balanced.
+
+### Intent prediction, full prefix (variant definitions in `biq/intent.py`)
+
+| variant | macro-F1 (simulated) | macro-F1 (REES46) | ROC-AUC (simulated) | ROC-AUC (REES46) |
+| --- | --- | --- | --- | --- |
+| A (aggregate features) | 0.846 | 0.669 | 0.953 | 0.806 |
+| B (+ hand-crafted sequence features) | 0.866 | 0.708 | 0.962 | 0.802 |
+| B+R (B + retrieval) | 0.861 | 0.708 | 0.961 | 0.808 |
+| C_base (generic text embedding) | 0.824 | 0.711 | 0.948 | 0.797 |
+| C (contrastive Transformer) | 0.760 | 0.588 | 0.914 | 0.798 |
+| C+R (C + retrieval) | 0.768 | 0.573 | 0.914 | 0.795 |
+| C-ft (fine-tuned Transformer head) | 0.843 | 0.696 | 0.953 | 0.806 |
+
+Full tables: `reports/stage8/intent.md` (simulated), `reports/rees46/stage8/intent.md` (REES46).
+
+**The ranking that holds on simulated data holds on real data too**: hand-crafted/count-based
+features (A, B, C_base) beat the learned contrastive embedding (C, C+R) on both datasets, and
+retrieval augmentation (+R) is a wash either way (REES46 paired bootstrap: C+R vs C macro-F1 delta
+-0.021, p = 0.93; B+R vs B delta -0.001, p = 0.59 - neither distinguishable from zero, same
+conclusion as the simulator run). Absolute scores are lower across the board on REES46, which is
+expected given the 2.9%/7.6% abandon/purchase classes are far rarer and the session text has only
+3 distinct event types to learn from (vocab size 7 including pad/mask/cls/unk, vs. a much richer
+vocabulary on the simulator) - the Transformer in particular has very little behavioural sequence
+to contrast against (neighbour-outcome agreement 0.829 vs. a 0.820 random baseline on REES46 -
+barely above chance - vs. 0.585 vs. 0.346 chance on the simulator, where the margin over random is
+much larger).
+
+### Early-prediction curve (macro-F1 by events observed)
+
+| events seen | A (sim / REES46) | B (sim / REES46) | C (sim / REES46) |
+| --- | --- | --- | --- |
+| 3 | 0.368 / 0.595 | 0.364 / 0.585 | 0.390 / 0.594 |
+| 5 | 0.587 / 0.621 | 0.589 / 0.644 | 0.579 / 0.594 |
+| 10 | 0.746 / 0.655 | 0.745 / 0.676 | 0.681 / 0.585 |
+| 20 | 0.837 / 0.669 | 0.835 / 0.699 | 0.745 / 0.586 |
+| full | 0.846 / 0.669 | 0.866 / 0.708 | 0.760 / 0.588 |
+
+On the simulator, macro-F1 climbs steadily as more of the session is observed (sessions run up to
+60 events deep). On REES46 it plateaus almost immediately after ~5 events and barely moves from
+there (full-prefix score for A/B is close to the 10-event score) - because the median REES46
+session only has 2 events total, so "full prefix" and "first 5 events" are nearly the same thing
+for most sessions. The early-prediction curve is much less informative on real short sessions than
+on the simulator's long ones.
+
+### Retrieval
+
+| metric | simulated (`biq_custom`) | REES46 (`biq_rees46_custom`) |
+| --- | --- | --- |
+| Precision@10 | 0.632 | 0.894 |
+| Recall@10 | 0.004 | 0.001 |
+| Abandoning-neighbour share (abandoning query) | 0.51 (base rate 0.36) | 0.30 (base rate 0.03) |
+| p50 / p95 latency | 7.4 / 29.9 ms | 71.2 / 82.0 ms |
+
+Precision@10 looks *better* on REES46, but that's an artefact of the skewed outcome mix: with 89.5%
+of the pool labelled "browse", a neighbour is "relevant" (same outcome as the query) by base rate
+alone far more often than on the simulator's near-uniform 3-way split - precision@k on an
+imbalanced label is not comparable across datasets. The more informative number is the
+abandoning-neighbour enrichment: for abandoning REES46 sessions, 30% of neighbours are themselves
+abandoning vs. a 3% pool base rate (a 10x enrichment), comparable in spirit to the simulator's 51%
+vs. 36% (1.4x). Latency is higher on REES46 (71ms vs 7ms p50) because the retrieval pool is larger
+(22,447 vs 4,200 train sessions) and local-mode Qdrant isn't tuned for that; both are still well
+under the project's 100ms target when run against a Qdrant server.
+
+### Drift detection: had to change the method, not just the data
+
+The first pass at this reused `biq.mlops.drift_experiment()`, which compares the training
+reference against *simulator-generated* "current" batches. That is meaningless on real data: it
+flagged **every** scenario, including a true no-shift control, as drifted (5/5 "detected", control
+false alarm = **True**) - not because the detector works, but because REES46 traffic and
+`biq.simulator` traffic differ structurally (different event vocabulary, session length, no
+review/compare events at all) regardless of any injected shift. `biq/mlops.py::real_data_drift_experiment()`
+replaces this for `--dataset rees46`: the reference is the train split, the control is the
+held-out *test* split used as-is (same real traffic, different time slice), and the four injected
+scenarios are the same test-split sessions resampled or perturbed (REES46 has no device column, so
+the "mobile-heavy" scenario falls back to a long-session-heavy resample; cart-heavy 4x-weights
+sessions with `add_to_cart`; dwell/time-gaps are scaled x3; category-mix 4x-weights the top
+category). Result: **2/4 injected drifts detected, no false alarm on control**
+(`reports/rees46/stage10_drift.md`):
+
+| scenario | injected | detected |
+| --- | --- | --- |
+| control (held-out test traffic) | No | No |
+| long-session-heavy resample | Yes | **Yes** (PSI 0.355 on event_count) |
+| cart-heavy resample (4x) | Yes | No (PSI 0.125, domain AUC 0.60 - under threshold) |
+| dwell/time-gaps x3 | Yes | **Yes** (PSI 0.322 on duration_s) |
+| category mix shift (4x, top category) | Yes | No |
+
+The two misses are explainable rather than bugs: cart-heavy only reweights ~2.2% of events
+(add_to_cart is rare in REES46), so even a 4x resample is a mild mixture shift; and the category
+mix shift is invisible *by construction* - `DRIFT_FEATURES` (`biq/mlops.py`) monitors behavioural
+counts and timing, not product category composition, so a pure category shift with no behavioural
+change cannot be caught by this feature set. That is a real, honest gap in what this drift monitor
+watches, not a REES46 artefact.
+
+### Stages that don't apply to real data
+
+- **Bandit** - skipped. It needs the reward of actions that were *not* taken (counterfactuals),
+  which the simulator supplies via a hidden-persona response model; logged real data never has
+  this.
+- **Mining ground truth** - `ari_vs_persona` is omitted from `reports/rees46/stage5_mining.md`;
+  there is no hidden persona label for real sessions, only the clusters themselves (HDBSCAN found
+  14 clusters incl. a small but sharply bimodal "cart abandoners" cluster: 860 sessions, 62%
+  abandonment, 38% conversion - vs. ~5% abandonment/conversion everywhere else).
+- **Copilot** - not run for this dataset in `run_all.py` (the warehouse views and guardrails work
+  unchanged against the REES46-derived catalogue; this just wasn't part of this session's scope).
+
 ## Likely viva questions
 - *Why a time-based split?* Random splits let the model see the future and inflate scores.
 - *How do you stop label leakage?* Inputs end before the first purchase/exit event (`prediction_prefix`).

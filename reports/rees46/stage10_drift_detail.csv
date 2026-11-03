@@ -1,0 +1,46 @@
+feature,psi,ks_pvalue,drifted,scenario
+event_count,0.0026202727034931412,0.030854428317062643,False,"control (held-out test traffic, no shift)"
+n_product_view,0.0032859856520526492,0.05376176575131908,False,"control (held-out test traffic, no shift)"
+n_review_view,0.0,1.0,False,"control (held-out test traffic, no shift)"
+n_compare,0.0,1.0,False,"control (held-out test traffic, no shift)"
+n_add_to_cart,0.003647950521694739,0.4644583416141752,False,"control (held-out test traffic, no shift)"
+n_remove_from_cart,0.0,1.0,False,"control (held-out test traffic, no shift)"
+n_checkout_start,0.0,1.0,False,"control (held-out test traffic, no shift)"
+duration_s,0.0016278815279472242,0.14326127022255908,False,"control (held-out test traffic, no shift)"
+is_mobile,0.0,1.0,False,"control (held-out test traffic, no shift)"
+event_count,0.3551415013590159,4.8441040599020917e-287,True,long-session-heavy resample (4x weight on above-median-length sessions; no device signal to resample on)
+n_product_view,0.2929180771943933,2.914963880879964e-245,True,long-session-heavy resample (4x weight on above-median-length sessions; no device signal to resample on)
+n_review_view,0.0,1.0,False,long-session-heavy resample (4x weight on above-median-length sessions; no device signal to resample on)
+n_compare,0.0,1.0,False,long-session-heavy resample (4x weight on above-median-length sessions; no device signal to resample on)
+n_add_to_cart,0.003493703819838997,0.3303683956828227,False,long-session-heavy resample (4x weight on above-median-length sessions; no device signal to resample on)
+n_remove_from_cart,0.0,1.0,False,long-session-heavy resample (4x weight on above-median-length sessions; no device signal to resample on)
+n_checkout_start,0.0,1.0,False,long-session-heavy resample (4x weight on above-median-length sessions; no device signal to resample on)
+duration_s,0.2521289832913579,1.9151753642064644e-191,True,long-session-heavy resample (4x weight on above-median-length sessions; no device signal to resample on)
+is_mobile,0.0,1.0,False,long-session-heavy resample (4x weight on above-median-length sessions; no device signal to resample on)
+event_count,0.007944101932622011,2.3391360819481142e-05,False,cart-heavy resample (4x weight on sessions with >=1 add_to_cart)
+n_product_view,0.004863201780434972,0.037223324231161925,False,cart-heavy resample (4x weight on sessions with >=1 add_to_cart)
+n_review_view,0.0,1.0,False,cart-heavy resample (4x weight on sessions with >=1 add_to_cart)
+n_compare,0.0,1.0,False,cart-heavy resample (4x weight on sessions with >=1 add_to_cart)
+n_add_to_cart,0.12540883351482096,1.915456984528259e-41,False,cart-heavy resample (4x weight on sessions with >=1 add_to_cart)
+n_remove_from_cart,0.0,1.0,False,cart-heavy resample (4x weight on sessions with >=1 add_to_cart)
+n_checkout_start,0.0,1.0,False,cart-heavy resample (4x weight on sessions with >=1 add_to_cart)
+duration_s,0.006276495526337189,6.963553481100416e-06,False,cart-heavy resample (4x weight on sessions with >=1 add_to_cart)
+is_mobile,0.0,1.0,False,cart-heavy resample (4x weight on sessions with >=1 add_to_cart)
+event_count,0.0026202727034931412,0.030854428317062643,False,"dwell/time-gaps x3 (duration_s, mean_gap_s scaled)"
+n_product_view,0.0032859856520526492,0.05376176575131908,False,"dwell/time-gaps x3 (duration_s, mean_gap_s scaled)"
+n_review_view,0.0,1.0,False,"dwell/time-gaps x3 (duration_s, mean_gap_s scaled)"
+n_compare,0.0,1.0,False,"dwell/time-gaps x3 (duration_s, mean_gap_s scaled)"
+n_add_to_cart,0.003647950521694739,0.4644583416141752,False,"dwell/time-gaps x3 (duration_s, mean_gap_s scaled)"
+n_remove_from_cart,0.0,1.0,False,"dwell/time-gaps x3 (duration_s, mean_gap_s scaled)"
+n_checkout_start,0.0,1.0,False,"dwell/time-gaps x3 (duration_s, mean_gap_s scaled)"
+duration_s,0.3219945405891127,4.430776898517647e-123,True,"dwell/time-gaps x3 (duration_s, mean_gap_s scaled)"
+is_mobile,0.0,1.0,False,"dwell/time-gaps x3 (duration_s, mean_gap_s scaled)"
+event_count,0.008995864116365115,7.049030955884803e-07,False,category mix shift (4x weight on top category 'electronics')
+n_product_view,0.014464459460527771,2.988039488158169e-12,False,category mix shift (4x weight on top category 'electronics')
+n_review_view,0.0,1.0,False,category mix shift (4x weight on top category 'electronics')
+n_compare,0.0,1.0,False,category mix shift (4x weight on top category 'electronics')
+n_add_to_cart,0.0020297772783205797,0.9770287369433561,False,category mix shift (4x weight on top category 'electronics')
+n_remove_from_cart,0.0,1.0,False,category mix shift (4x weight on top category 'electronics')
+n_checkout_start,0.0,1.0,False,category mix shift (4x weight on top category 'electronics')
+duration_s,0.00813959487484042,3.179054768515572e-07,False,category mix shift (4x weight on top category 'electronics')
+is_mobile,0.0,1.0,False,category mix shift (4x weight on top category 'electronics')

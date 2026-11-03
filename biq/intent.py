@@ -48,9 +48,13 @@ class Baseline:
         except Exception:
             from sklearn.decomposition import TruncatedSVD
             from sklearn.feature_extraction.text import TfidfVectorizer
-            self.st = None; self.name = "TF-IDF(1-3)+SVD-64"
             self.vec = TfidfVectorizer(ngram_range=(1, 3), token_pattern=r"[^ ]+").fit(train_texts)
-            self.svd = TruncatedSVD(E.DIM, random_state=config.SEED).fit(self.vec.transform(train_texts))
+            X_train = self.vec.transform(train_texts)
+            # see biq/encoder.py::baseline_embed - low-diversity real-data text can have fewer
+            # n-gram features than E.DIM
+            n_comp = max(1, min(E.DIM, X_train.shape[1] - 1))
+            self.st = None; self.name = f"TF-IDF(1-3)+SVD-{n_comp}"
+            self.svd = TruncatedSVD(n_comp, random_state=config.SEED).fit(X_train)
 
     def __call__(self, texts):
         from sklearn.preprocessing import normalize

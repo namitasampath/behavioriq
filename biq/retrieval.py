@@ -18,7 +18,10 @@ from qdrant_client import QdrantClient, models
 
 from . import config
 
-COLLECTIONS = {"biq_custom": "emb_custom.npy", "biq_baseline": "emb_baseline.npy"}
+COLLECTION_PREFIX = os.getenv("BIQ_QDRANT_PREFIX", "biq")  # namespaces collections when QDRANT_URL
+                                                            # is a shared server, so a --dataset run
+                                                            # never overwrites another dataset's index
+COLLECTIONS = {f"{COLLECTION_PREFIX}_custom": "emb_custom.npy", f"{COLLECTION_PREFIX}_baseline": "emb_baseline.npy"}
 _client: QdrantClient | None = None
 
 
@@ -65,7 +68,7 @@ def _filter(as_of: float | None, exclude_session: str | None, device: str | None
     return models.Filter(must=must or None, must_not=must_not or None)
 
 
-def neighbors(vector, k: int = 10, collection: str = "biq_custom", as_of: float | None = None,
+def neighbors(vector, k: int = 10, collection: str = f"{COLLECTION_PREFIX}_custom", as_of: float | None = None,
               exclude_session: str | None = None, device: str | None = None) -> list[dict]:
     res = client().query_points(collection, query=list(map(float, vector)), limit=k,
                                 query_filter=_filter(as_of, exclude_session, device), with_payload=True)
@@ -116,7 +119,7 @@ def check_equivalence(n: int = 50, k: int = 10) -> float:
     idx = pd.read_parquet(config.DATA / "embedding_index.parquet")
     test = idx[idx.split == "test"].head(n)
     V = np.load(config.DATA / "emb_custom.npy")[test.index]
-    a = [{x["session_id"] for x in r} for r in neighbors_batch(V, k, "biq_custom")]
+    a = [{x["session_id"] for x in r} for r in neighbors_batch(V, k, f"{COLLECTION_PREFIX}_custom")]
     b = [{x["session_id"] for x in r} for r in exact_neighbors_batch(V, k)]
     return float(np.mean([len(x & y) / k for x, y in zip(a, b)]))
 

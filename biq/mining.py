@@ -59,7 +59,9 @@ def run(sessions: pd.DataFrame | None = None, truth: pd.DataFrame | None = None)
     from sklearn.preprocessing import StandardScaler
 
     s = sessions if sessions is not None else pd.read_parquet(config.SESSIONS)
-    truth = truth if truth is not None else pd.read_parquet(config.TRUTH)
+    if truth is None and config.TRUTH.exists():
+        truth = pd.read_parquet(config.TRUTH)
+    has_truth = truth is not None   # hidden personas: only the simulator has them (evaluation only)
     out = [f"# Stage 5 - Behavioral mining report\n\nSessions analysed: {len(s):,}\n"]
     base_abandon = (s.outcome == "abandon").mean()
 
@@ -112,17 +114,21 @@ def run(sessions: pd.DataFrame | None = None, truth: pd.DataFrame | None = None)
     labels = hdb.labels_
     mask = labels >= 0
     km = KMeans(n_clusters=5, n_init=10, random_state=0).fit(X)
-    merged = s[["session_id"]].merge(truth[["session_id", "persona"]], on="session_id")
-    metrics = pd.DataFrame([
+    metrics_rows = [
         dict(method="HDBSCAN", clusters=len(set(labels[mask])), noise_share=float((~mask).mean()),
              silhouette=silhouette_score(X[mask], labels[mask]) if mask.sum() > 50 and len(set(labels[mask])) > 1 else np.nan,
-             davies_bouldin=davies_bouldin_score(X[mask], labels[mask]) if len(set(labels[mask])) > 1 else np.nan,
-             ari_vs_persona=adjusted_rand_score(merged.persona[mask], labels[mask])),
+             davies_bouldin=davies_bouldin_score(X[mask], labels[mask]) if len(set(labels[mask])) > 1 else np.nan),
         dict(method="K-Means (k=5)", clusters=5, noise_share=0.0, silhouette=silhouette_score(X, km.labels_),
-             davies_bouldin=davies_bouldin_score(X, km.labels_), ari_vs_persona=adjusted_rand_score(merged.persona, km.labels_)),
-    ])
-    out.append("## Clustering quality\n\n" + metrics.round(3).to_markdown(index=False) +
-               "\n\nARI compares clusters with the simulator's hidden personas (evaluation only).\n")
+             davies_bouldin=davies_bouldin_score(X, km.labels_)),
+    ]
+    if has_truth:
+        merged = s[["session_id"]].merge(truth[["session_id", "persona"]], on="session_id")
+        metrics_rows[0]["ari_vs_persona"] = adjusted_rand_score(merged.persona[mask], labels[mask])
+        metrics_rows[1]["ari_vs_persona"] = adjusted_rand_score(merged.persona, km.labels_)
+    metrics = pd.DataFrame(metrics_rows)
+    note = ("\n\nARI compares clusters with the simulator's hidden personas (evaluation only).\n" if has_truth else
+            "\n\nNo ground-truth personas for this dataset (real logs have no hidden labels) - ARI is omitted.\n")
+    out.append("## Clustering quality\n\n" + metrics.round(3).to_markdown(index=False) + note)
 
     feats["cluster"] = labels
     feats["outcome"] = s.outcome.values
