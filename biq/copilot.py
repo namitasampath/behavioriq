@@ -152,6 +152,26 @@ OPENAI_TOOLS = [{"type": "function", "function": {"name": t["name"], "descriptio
                                                     "parameters": t["input_schema"]}} for t in TOOLS]
 
 
+def _ollama_system_prompt() -> str:
+    """SYSTEM plus the describe_schema() output inlined, and one worked run_sql example - small
+    local models tend to guess view/column names instead of calling describe_schema first, so this
+    puts the schema in front of them without an extra tool round trip. Ollama-only; the Anthropic
+    path's SYSTEM is unchanged."""
+    schema = describe_schema()
+    lines = [f"- {v}: {schema[v]['description']}\n  columns: " +
+             ", ".join(f"{c} ({t})" for c, t in schema[v]["columns"]) for v in VIEWS]
+    schema_block = "\n".join(lines)
+    example = (
+        "Worked example (illustrative only, not one of your actual questions): to answer "
+        '"Break down sessions by outcome, with session counts and average events per outcome", '
+        "call run_sql with exactly:\n"
+        "SELECT outcome, session_count, avg_events FROM v_outcome_summary ORDER BY outcome\n"
+        'This might return rows like {"outcome": "purchase", "session_count": 1570, "avg_events": 14.2}. '
+        "Always use the exact view and column names listed above - never guess a column name."
+    )
+    return f"{SYSTEM}\n\nSchema (the whitelisted views and their columns):\n{schema_block}\n\n{example}"
+
+
 # ---------------------------------------------------------------- grounding
 NUM = re.compile(r"(?<![\w.])-?\d+(?:,\d{3})*(?:\.\d+)?%?")
 
@@ -220,7 +240,7 @@ def ask_ollama(question: str, max_tool_calls: int = 6) -> dict:
     server through its OpenAI-compatible /v1 endpoint instead of the Anthropic API."""
     import openai
     client = openai.OpenAI(base_url=config.OLLAMA_BASE_URL, api_key="ollama", timeout=120)
-    msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": question}]
+    msgs = [{"role": "system", "content": _ollama_system_prompt()}, {"role": "user", "content": question}]
     outputs, sqls = [], []
     for attempt in range(2):
         calls = 0
@@ -357,7 +377,7 @@ EVAL = [  # (question, gold SQL, gold value column, how to pick)
 ]
 
 
-def evaluate():
+def evaluate(out_name: str | None = None):
     rows = []
     con = connect(read_only=True)
     for q, gold_sql in EVAL:
@@ -384,7 +404,7 @@ def evaluate():
               "guardrails and grounding check work - it is NOT evidence of LLM accuracy. Set ANTHROPIC_API_KEY and rerun "
               "`python -m biq.copilot --eval` for the real Stage 9 result.\n\n" if df["mode"].iloc[0] == "offline" else "")
            + df.to_markdown(index=False) + "\n")
-    name = "stage9_copilot_ollama.md" if config.LLM_PROVIDER == "ollama" else "stage9_copilot.md"
+    name = out_name or ("stage9_copilot_ollama.md" if config.LLM_PROVIDER == "ollama" else "stage9_copilot.md")
     (config.REPORTS / name).write_text(rep, encoding="utf-8")
     print(rep)
 

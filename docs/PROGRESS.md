@@ -88,6 +88,49 @@ pytest
 #    path unaffected)
 ```
 
+### Follow-up (2026-11-03) — schema-in-prompt for the Ollama path
+
+The 2/16 result above was dominated by one fixable pattern: the model mostly never called
+`describe_schema` before guessing a view/column name. Added `biq/copilot.py::_ollama_system_prompt()`
+(Ollama path only - `SYSTEM`, `TOOLS`, `guard_sql`, `run_sql`, `grounded()`, the regenerate-once
+logic, and the Anthropic path are all untouched), which appends the `describe_schema()` output (all
+8 view names, descriptions, exact column names/types) plus one worked `run_sql` example on
+`v_outcome_summary` (not one of the 16 eval questions) directly into `ask_ollama()`'s system message,
+so the model sees the real schema before writing SQL instead of needing an extra tool round trip to
+look it up. `evaluate()` gained an optional `out_name` parameter (default unchanged: still
+`stage9_copilot_ollama.md`/`stage9_copilot.md` based on `LLM_PROVIDER`) so this run could be saved
+alongside the original without overwriting it.
+
+Result, same 16 questions, not tuned to the model, same `QDRANT_URL` workaround:
+
+| Run | File | Correct | Unfounded numbers reaching the user | Attacks blocked |
+| --- | --- | --- | --- | --- |
+| v1 (no schema in prompt) | `reports/stage9_copilot_ollama.md` | 2/16 (12%) | 0 | 4/4 |
+| v2 (schema in prompt) | `reports/stage9_copilot_ollama_v2.md` | **11/16 (69%)** | 0 | 4/4 |
+
+Still below the >=90% DoD target and the offline router's 16/16, but a single prompt change took the
+local copilot from 12% to 69% with no retraining, no bigger model, and no extra tool call. The 5
+remaining v2 failures: an unweighted-average conversion-rate mistake (26.30% vs. the true 26.2%),
+two wrong-aggregation-level mistakes on `v_conversion_by_segment` (read one device x referrer x
+segment row instead of aggregating across the device), one honest refusal after failing the
+grounding check twice, and one data-*value* mistake (filtered on `'cart_abandoners'` instead of the
+real label `'cart abandoners (c3)'` - the schema block gives column names/types, not the string
+values stored in them, so this failure mode is structurally out of its reach). Full per-question
+breakdown: `docs/RESULTS_FOR_REPORT.md` ("Upgrade 6" → "Follow-up: schema-in-prompt").
+
+```
+python -m pytest -q
+# -> 10 passed, no env vars set (default anthropic-gated path still unaffected)
+
+python -c "from biq import copilot; print(len(copilot._ollama_system_prompt()))"
+# -> 3,160 chars: SYSTEM + all 8 view docs/columns + the v_outcome_summary worked example
+
+$env:BIQ_LLM_PROVIDER = "ollama"; $env:QDRANT_URL = "http://localhost:6333"
+python -c "from biq import copilot; copilot.evaluate(out_name='stage9_copilot_ollama_v2.md')"
+# -> reports/stage9_copilot_ollama_v2.md: 11/16 (69%) correct, 0 unfounded numbers reached the
+#    user, 4/4 attacks blocked; reports/stage9_copilot_ollama.md (v1, 2/16) left untouched on disk
+```
+
 ## Upgrade 5 — REES46 real-data replay — done (2026-11-03)
 
 `python run_all.py --dataset rees46 [--sessions N]` replays the REES46 "eCommerce behavior data

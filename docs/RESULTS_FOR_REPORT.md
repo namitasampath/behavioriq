@@ -15,7 +15,7 @@ time-based 70/15/15 split). Every number below is reproducible; full tables are 
 | Retrieval precision | P@10 > 0.7 | 0.63 | **No** - see finding 3 |
 | Intent: C+R beats A and B | measurable delta | C+R does not beat A/B | **No** - see findings 1-2 |
 | Contextual bandit | beats fixed rule after warm-up | +16% total reward; ahead after 50 decisions | Yes |
-| Copilot | >= 90% correct, 0 unfounded numbers | offline router 16/16 (not evidence of LLM accuracy); real LLM run (local qwen2.5:3b via Ollama, no API key available) 2/16 (12%), 1 answer caught and refused by the grounding check (0 unfounded numbers reached the user), 4/4 attacks blocked | **No** - see Upgrade 6 |
+| Copilot | >= 90% correct, 0 unfounded numbers | offline router 16/16 (not evidence of LLM accuracy); real LLM run (local qwen2.5:3b via Ollama, no API key available): 2/16 (12%) without schema-in-prompt, **11/16 (69%)** with it; 0 unfounded numbers reached the user in either run, 4/4 attacks blocked | **No** - see Upgrade 6 |
 | Drift monitoring | 100% of injections | 5/5 detected, no false alarm on control | Yes |
 
 ## Findings (write these honestly - they are a stronger viva than inflated numbers)
@@ -227,6 +227,44 @@ works correctly regardless of model quality.
   Claude key would very likely score far closer to the offline router's 16/16, as the mechanism
   (tools, guardrail, grounding) is identical to the already-working Anthropic path.
 
+### Follow-up: schema-in-prompt (`reports/stage9_copilot_ollama_v2.md`)
+
+The failure analysis above pointed at one specific, fixable cause for 9 of the 14 failures: the model
+mostly never called `describe_schema` before guessing a view/column name, inside its 6-tool-call
+budget. `_ollama_system_prompt()` (Ollama path only - the Anthropic `SYSTEM` prompt, tools, guardrail,
+grounding and regenerate-once logic are all unchanged) now inlines the `describe_schema()` output
+(all 8 view names, descriptions and exact column names/types) directly into the system prompt, plus
+one worked `run_sql` example against `v_outcome_summary` that is not one of the 16 eval questions -
+so the model sees the real schema and one correct query shape before it writes any SQL, without
+spending a tool call to look it up.
+
+Same 16 questions, not tuned to the model, same `QDRANT_URL` workaround:
+
+| Run | Correct | Unfounded numbers reaching the user | Attacks blocked |
+| --- | --- | --- | --- |
+| v1 - no schema in prompt (`stage9_copilot_ollama.md`) | 2/16 (12%) | 0 | 4/4 |
+| v2 - schema in prompt (`stage9_copilot_ollama_v2.md`) | **11/16 (69%)** | 0 | 4/4 |
+
+A single, cheap prompt change (no retraining, no bigger model, no extra tool round trip) took the
+local copilot from 12% to 69% - confirming the Upgrade 6 conclusion that the bottleneck was SQL
+authoring against an unfamiliar schema, not tool-calling mechanics or the guardrail machinery. It is
+still below the >=90% DoD target and below the offline router's 16/16, so the verdict stays **No**,
+but the gap to "good enough to demo" is now small rather than fundamental.
+
+The 5 remaining v2 failures:
+
+| Question | What happened |
+| --- | --- |
+| Overall conversion rate (26.30% vs. true 26.2%) | Grounded and close, but computed an unweighted average of `v_funnel_daily.conversion_rate` across days instead of `SUM(purchased)/SUM(session_count)` - a weighting mistake, not a schema mistake. |
+| Conversion rate on mobile | Reported a range ("0% to 0.83%") instead of the one aggregate figure - read individual `v_conversion_by_segment` rows (one per device x referrer x segment) without aggregating them across all mobile sessions. |
+| Conversion rate on desktop (72.5%/40 sessions vs. the real cross-segment rate) | Same cause: picked one narrow segment/referrer row from `v_conversion_by_segment` instead of aggregating across all desktop sessions - it did correctly surface the k-anonymity suppression note, so the privacy floor is visible in the answer even when the aggregation is wrong. |
+| Category with the highest add-to-cart rate | Failed the grounding check twice and was correctly refused rather than shown a hallucinated number - the one guardrail-triggered case in this run too. |
+| Sessions in the cart-abandoners segment (answered 0) | The schema block gives column **names** and **types**, not the actual string values stored in them - the model still filtered on `segment = 'cart_abandoners'` instead of the real label `'cart abandoners (c3)'` (needs a `LIKE`). Schema-in-prompt cannot fix a wrong-literal-value mistake, only a wrong-structure mistake. |
+
+So the residual failures are a weighting bug, two wrong-aggregation-level mistakes, one honest refusal,
+and one data-values mistake the schema block structurally cannot address - a materially different (and
+smaller) failure surface than v1's dominant "picked the wrong view entirely" pattern.
+
 ## Likely viva questions
 - *Why a time-based split?* Random splits let the model see the future and inflate scores.
 - *How do you stop label leakage?* Inputs end before the first purchase/exit event (`prediction_prefix`).
@@ -237,4 +275,9 @@ works correctly regardless of model quality.
   can't reliably pick the right view or write correct aggregation SQL against an 8-view schema from
   a text description alone - see Upgrade 6. The guardrails (SQL whitelist, k-anonymity, grounding
   check) are model-independent and caught every unsafe/ungrounded case regardless.
+- *How did it get to 69%?* Putting `describe_schema()`'s own output directly in the system prompt
+  (plus one worked `run_sql` example) removed the "guess a view/column name" failure mode without
+  touching the guardrail, grounding check or tools - see the schema-in-prompt follow-up under
+  Upgrade 6. The residual failures are weighting/aggregation-level mistakes and one data-*value*
+  mistake (a segment label format), which schema structure alone can't fix.
 - *How is the copilot kept honest?* SQL is limited to whitelisted views, rows from fewer than 20 sessions are suppressed, and every number in an answer is checked against tool output.

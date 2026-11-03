@@ -110,10 +110,13 @@ source data can't give us (missing event types, no device/referrer, no hidden pe
   consideration events) don't transfer - see `docs/RESULTS_FOR_REPORT.md`.
 * The bandit can only be evaluated in simulation, because logged data does not show the outcomes of actions that were not taken.
 * The free local-LLM copilot (`BIQ_LLM_PROVIDER=ollama`, `qwen2.5:3b`) scores 2/16 (12%) on the Stage 9
-  eval set, well below the offline router's 16/16 and the >=90% DoD target - it reliably calls the
-  one tool that needs no SQL, but mostly picks the wrong view or writes wrong SQL against the 8-view
-  schema. The guardrails caught every unfounded/malicious case regardless (0 unfounded numbers
-  reached the user, 4/4 attacks blocked) - see `docs/RESULTS_FOR_REPORT.md` ("Upgrade 6") for the
-  full breakdown. Treat it as a free, private, honestly-labelled demo mode, not a Claude replacement.
+  eval set with a bare system prompt, well below the offline router's 16/16 and the >=90% DoD target -
+  it reliably calls the one tool that needs no SQL, but mostly picks the wrong view or writes wrong SQL
+  against the 8-view schema. Inlining the `describe_schema()` output and one worked `run_sql` example
+  into the system prompt (Ollama path only) raises this to 11/16 (69%) with no other change - still
+  short of the target, but the dominant failure mode shifts from "wrong view" to smaller aggregation
+  mistakes. The guardrails caught every unfounded/malicious case in both runs (0 unfounded numbers
+  reached the user, 4/4 attacks blocked) - see `docs/RESULTS_FOR_REPORT.md` ("Upgrade 6") for the full
+  breakdown. Treat it as a free, private, honestly-labelled demo mode, not a Claude replacement.
 * Heavy infrastructure (Kafka, Flink, Feast, ClickHouse) is replaced by in-process equivalents, as listed above.
 * In `WAREHOUSE=clickhouse` mode, `fact_user_events` is append-only across warehouse rebuilds (never truncated, unlike DuckDB's full `CREATE OR REPLACE TABLE`) because a ClickHouse Kafka-engine materialized view keeps inserting into it continuously; `ReplacingMergeTree(ingested_at)` + `FINAL` dedup duplicate `event_id`s at query time instead. Raw (pre-merge) row count grows with every rebuild as a result.
