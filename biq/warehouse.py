@@ -77,10 +77,16 @@ VIEW_DOCS = {
 
 
 def connect(read_only: bool = False):
-    return duckdb.connect(str(config.WAREHOUSE), read_only=read_only)
+    if config.WAREHOUSE_BACKEND == "clickhouse":
+        from . import warehouse_clickhouse as ch
+        return ch.connect(read_only=read_only)
+    return duckdb.connect(str(config.WAREHOUSE_DB), read_only=read_only)
 
 
 def build(segments: pd.DataFrame | None = None):
+    if config.WAREHOUSE_BACKEND == "clickhouse":
+        from . import warehouse_clickhouse as ch
+        return ch.build(segments)
     events = pd.read_parquet(config.RAW_EVENTS)
     sessions = pd.read_parquet(config.SESSIONS)
     catalogue = pd.DataFrame(json.loads(config.CATALOGUE.read_text()))
@@ -121,11 +127,14 @@ def build(segments: pd.DataFrame | None = None):
     n_e = con.execute("SELECT COUNT(*) FROM fact_user_events").fetchone()[0]
     n_s = con.execute("SELECT COUNT(*) FROM fact_sessions").fetchone()[0]
     con.close()
-    print(f"warehouse built: {n_e:,} events, {n_s:,} sessions, {len(VIEWS)} views -> {config.WAREHOUSE}")
+    print(f"warehouse built: {n_e:,} events, {n_s:,} sessions, {len(VIEWS)} views -> {config.WAREHOUSE_DB}")
 
 
 def spot_check(n: int = 10, seed: int = 0) -> int:
     """Rebuild n random sessions from raw events and compare against fact tables (Stage 4 DoD)."""
+    if config.WAREHOUSE_BACKEND == "clickhouse":
+        from . import warehouse_clickhouse as ch
+        return ch.spot_check(n, seed)
     raw = pd.read_parquet(config.RAW_EVENTS)
     con = connect(read_only=True)
     sample = con.execute(f"SELECT session_id, n_events, outcome FROM fact_sessions USING SAMPLE {n} ROWS (reservoir, {seed})").df()

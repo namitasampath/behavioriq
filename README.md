@@ -72,7 +72,7 @@ MLflow UI: `mlflow ui --backend-store-uri sqlite:///mlflow.db`
 | JSONL event bus | Kafka / Redpanda | set `KAFKA_BOOTSTRAP=localhost:19092`, `pip install kafka-python`; `bus.py` already uses it |
 | Python session processor | Apache Flink (PyFlink) | port `SessionState.update` into a `KeyedProcessFunction`; the logic is identical |
 | SQLite + Parquet feature store | Feast with Redis online store | `FEATURE_COLUMNS` becomes a Feast FeatureView |
-| DuckDB | ClickHouse (facts) + PostgreSQL (dims) | the view SQL is standard and ports with minor changes |
+| DuckDB | ClickHouse (facts) + PostgreSQL (dims) | `pip install clickhouse-connect psycopg2-binary`; `docker compose -f infra/docker-compose.yml --profile warehouse up -d --wait`; set `WAREHOUSE=clickhouse`; `warehouse.py` already uses it |
 | Qdrant local mode | Qdrant server | set `QDRANT_URL=http://localhost:6333` |
 | PSI/KS drift | Evidently AI | same statistics; Evidently adds HTML reports |
 | `/metrics` endpoints | Prometheus + Grafana | point Prometheus at `:8000/metrics` and `:8001/metrics` |
@@ -82,3 +82,4 @@ MLflow UI: `mlflow ui --backend-store-uri sqlite:///mlflow.db`
 * Most data is synthetic. The simulator's personas overlap and it adds noise, but conclusions need confirming on real data (e.g. the REES46 Kaggle dataset).
 * The bandit can only be evaluated in simulation, because logged data does not show the outcomes of actions that were not taken.
 * Heavy infrastructure (Kafka, Flink, Feast, ClickHouse) is replaced by in-process equivalents, as listed above.
+* In `WAREHOUSE=clickhouse` mode, `fact_user_events` is append-only across warehouse rebuilds (never truncated, unlike DuckDB's full `CREATE OR REPLACE TABLE`) because a ClickHouse Kafka-engine materialized view keeps inserting into it continuously; `ReplacingMergeTree(ingested_at)` + `FINAL` dedup duplicate `event_id`s at query time instead. Raw (pre-merge) row count grows with every rebuild as a result.

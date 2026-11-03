@@ -232,8 +232,9 @@ def ask_offline(question: str) -> dict:
         r = o["rows"][0]
         ans = f"The segment '{r['segment']}' has the highest {col.replace('_', ' ')}: {_fmt_pct(r[col])}, based on {_n(r['session_count'])} sessions."
     elif any(w in q for w in ("device", "mobile", "desktop", "tablet")):
-        o = sql("SELECT device, SUM(session_count) AS session_count, ROUND(SUM(conversion_rate*session_count)/SUM(session_count),4) AS conversion_rate "
-                "FROM v_conversion_by_segment GROUP BY device ORDER BY conversion_rate DESC")
+        o = sql("SELECT device, n AS session_count, ROUND(conv / n, 4) AS conversion_rate FROM "
+                "(SELECT device, SUM(session_count) AS n, SUM(conversion_rate*session_count) AS conv "
+                "FROM v_conversion_by_segment GROUP BY device) ORDER BY conversion_rate DESC")
         rows = o["rows"]
         asked = [r for r in rows if r["device"] in q]
         lead = (f"Conversion on {asked[0]['device']} is {_fmt_pct(asked[0]['conversion_rate'])} "
@@ -255,7 +256,8 @@ def ask_offline(question: str) -> dict:
         r = o["rows"][0]
         ans = f"'{r['category']}' has the highest add-to-cart rate per product view: {_fmt_pct(r['cart_rate'])} across {_n(r['session_count'])} sessions."
     elif "conversion" in q or "convert" in q:
-        o = sql("SELECT SUM(session_count) AS session_count, ROUND(SUM(purchased)/SUM(session_count),4) AS conversion_rate FROM v_funnel_daily")
+        o = sql("SELECT n AS session_count, ROUND(p / n, 4) AS conversion_rate FROM "
+                "(SELECT SUM(session_count) AS n, SUM(purchased) AS p FROM v_funnel_daily)")
         r = o["rows"][0]
         ans = f"Overall conversion rate is {_fmt_pct(r['conversion_rate'])} across {_n(r['session_count'])} sessions."
     elif "how many" in q or "sessions" in q:

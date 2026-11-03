@@ -17,6 +17,8 @@ plotly
 sqlglot
 anthropic
 mlflow
+clickhouse-connect
+psycopg2-binary
 scipy
 matplotlib
 torch
