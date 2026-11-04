@@ -1,4 +1,5 @@
 .venv/
+.venv-evidently/
 __pycache__/
 *.pyc
 data/
@@ -8,3 +9,8 @@ mlflow.db
 mlartifacts/
 .env
 .pytest_cache/
+node_modules/
+.next/
+tracker-sdk/dist/
+storefront/.env.local
+*.log

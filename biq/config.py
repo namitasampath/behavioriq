@@ -44,6 +44,29 @@ POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "biq_pw")
 # service names on the Docker network, not "localhost" like the vars above)
 POSTGRES_HOST_IN_DOCKER = os.getenv("POSTGRES_HOST_IN_DOCKER", "postgres")
 KAFKA_BOOTSTRAP_IN_DOCKER = os.getenv("KAFKA_BOOTSTRAP_IN_DOCKER", "redpanda:9092")
-LLM_MODEL = os.getenv("BIQ_LLM_MODEL", "claude-haiku-5-5")
+
+# LLM copilot backend: "anthropic" (default, needs ANTHROPIC_API_KEY) or "ollama" (free, local,
+# needs an Ollama server reachable at OLLAMA_BASE_URL with BIQ_LLM_MODEL pulled)
+LLM_PROVIDER = os.getenv("BIQ_LLM_PROVIDER", "anthropic")
+OLLAMA_BASE_URL = os.getenv("BIQ_OLLAMA_URL", "http://localhost:11434/v1")
+LLM_MODEL = os.getenv("BIQ_LLM_MODEL", "qwen2.5:3b" if LLM_PROVIDER == "ollama" else "claude-haiku-5-5")
 SEED = int(os.getenv("BIQ_SEED", "42"))
 N_SESSIONS = int(os.getenv("BIQ_N_SESSIONS", "6000"))
+
+# Evidently AI drift reports (Upgrade 7): BIQ_EVIDENTLY=1 enables generating an Evidently HTML
+# report + JSON summary per drift scenario, alongside the existing PSI/domain-classifier drift
+# tables in biq/mlops.py. Evidently 0.7.23 is incompatible with this project's pandas 3.1.0 (it
+# calls an internal pandas API pandas 3 removed), so it runs out-of-process in a separate venv -
+# see requirements-evidently.txt - rather than being installed into this project's venv.
+EVIDENTLY_ENABLED = os.getenv("BIQ_EVIDENTLY", "") == "1"
+EVIDENTLY_PYTHON = os.getenv("BIQ_EVIDENTLY_PYTHON", str(ROOT / ".venv-evidently" / "Scripts" / "python.exe"))
+
+# Feature store online backend (Upgrade 4): FEATURE_STORE=redis switches FeatureStore's online
+# store from SQLite to Redis. Feast itself (the originally planned backend) is blocked in this
+# venv - feast 0.67.0 needs pandas<3 (this project pins pandas 3.1.0) and also downgrades
+# prometheus-client, which biq/ingest_api.py and biq/serve_api.py (Upgrade 3) depend on - so
+# redis-py is used directly behind the same FeatureStore interface instead. Unset (default
+# "sqlite") keeps the original SQLite online store; the Parquet offline store is unchanged either
+# way. See docs/PROGRESS.md ("Upgrade 4") for the dependency check that ruled Feast out.
+FEATURE_STORE_BACKEND = os.getenv("FEATURE_STORE", "sqlite")
+REDIS_URL = os.getenv("BIQ_REDIS_URL", "redis://localhost:6379/0")

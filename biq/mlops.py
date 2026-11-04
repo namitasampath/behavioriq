@@ -10,7 +10,12 @@ or when a domain classifier separates live from training traffic with ROC-AUC > 
 """
 from __future__ import annotations
 
+import json
 import os
+import re
+import subprocess
+import tempfile
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -102,6 +107,68 @@ def domain_classifier_auc(ref: pd.DataFrame, cur: pd.DataFrame) -> float:
     return float(cross_val_score(HistGradientBoostingClassifier(max_iter=100), X, y, cv=5, scoring="roc_auc").mean())
 
 
+def _slug(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+
+
+def evidently_report(ref: pd.DataFrame, cur: pd.DataFrame, out_dir: Path, scenario: str) -> dict | None:
+    """Generate one scenario's Evidently data-drift HTML report (+ JSON summary) by shelling out
+    to `.venv-evidently`'s python running `biq/evidently_reports.py` - see that module's docstring
+    for why Evidently runs out-of-process. Returns None (printing a one-line, non-fatal skip
+    message) when `BIQ_EVIDENTLY=1` isn't set or `.venv-evidently` doesn't exist, so the
+    PSI/domain-classifier drift experiments behave exactly as before by default."""
+    if not config.EVIDENTLY_ENABLED:
+        return None
+    python = Path(config.EVIDENTLY_PYTHON)
+    if not python.exists():
+        print(f"[evidently] BIQ_EVIDENTLY=1 but {python} does not exist - skipping Evidently "
+              f"reports this run (see requirements-evidently.txt). PSI/domain-classifier drift "
+              f"detection is unaffected.")
+        return None
+    out_dir.mkdir(parents=True, exist_ok=True)
+    html_out = out_dir / f"{_slug(scenario)}.html"
+    with tempfile.TemporaryDirectory() as td:
+        ref_path, cur_path, json_out = Path(td) / "ref.parquet", Path(td) / "cur.parquet", Path(td) / "summary.json"
+        ref[DRIFT_FEATURES].to_parquet(ref_path)
+        cur[DRIFT_FEATURES].to_parquet(cur_path)
+        proc = subprocess.run(
+            [str(python), str(config.ROOT / "biq" / "evidently_reports.py"),
+             "--reference", str(ref_path), "--current", str(cur_path),
+             "--columns", ",".join(DRIFT_FEATURES), "--html-out", str(html_out), "--json-out", str(json_out)],
+            capture_output=True, text=True)
+        if proc.returncode != 0:
+            print(f"[evidently] report generation failed for scenario '{scenario}' - skipping it, "
+                  f"PSI/domain-classifier result is unaffected:\n{proc.stderr[-2000:]}")
+            return None
+        return json.loads(json_out.read_text(encoding="utf-8")) | {"html_path": str(html_out)}
+
+
+def _evidently_row(ref: pd.DataFrame, cur: pd.DataFrame, out_dir: Path, scenario: str, our_verdict: bool) -> dict:
+    """Evidently columns for one drift-table row: its own dataset-drift verdict, the share of
+    drifted columns it found, and whether that verdict agrees with our PSI/domain-classifier rule
+    (which stays the actual pass/fail decision - Evidently is reported alongside it, not used to
+    override it). All three are NaN/None when Evidently didn't run (see `evidently_report()`)."""
+    res = evidently_report(ref, cur, out_dir, scenario)
+    if res is None:
+        return dict(evidently_drift=None, evidently_share_drifted=None, agrees_with_our_rule=None)
+    return dict(evidently_drift=res["dataset_drift"], evidently_share_drifted=res["share_drifted_columns"],
+                agrees_with_our_rule=res["dataset_drift"] == our_verdict)
+
+
+def _evidently_footer(df: pd.DataFrame, out_dir: Path) -> str:
+    if df["evidently_drift"].isna().all():
+        return ("\n_Evidently AI reports not generated this run (set `BIQ_EVIDENTLY=1` with "
+                "`.venv-evidently` set up per `requirements-evidently.txt` to include them)._\n")
+    agree = df["agrees_with_our_rule"]
+    try:
+        shown = out_dir.relative_to(config.ROOT).as_posix()
+    except ValueError:
+        shown = str(out_dir)
+    return (f"\nEvidently AI agreement: {int(agree.sum())}/{len(agree)} scenarios where Evidently's "
+            f"own dataset-drift verdict (share of drifted columns >= 0.5, its own preset default) "
+            f"matched our PSI/domain-classifier rule. Per-scenario HTML reports: `{shown}/`.\n")
+
+
 def _simulate(n, seed, persona_override=None, mobile=None, dwell_mult=None):
     saved = {k: dict(v) for k, v in SIM.PERSONAS.items()}
     try:
@@ -133,22 +200,27 @@ def drift_experiment(n: int = 1500):
         "slow sessions (dwell x3)": dict(dwell_mult=3.0),
         "abandoner wave (85% abandoners)": dict(persona_override=_dominant("abandoner")),
     }
+    evidently_dir = config.REPORTS / "evidently"
     rows, detail = [], []
     for i, (name, kw) in enumerate(scenarios.items()):
         cur = session_features(_simulate(n, 1000 + i, **kw))
         rep = drift_report(ref, cur)
         auc = domain_classifier_auc(ref, cur)
         flagged = bool(rep.drifted.any()) or auc > 0.6
-        rows.append(dict(scenario=name, injected=name.startswith("control") is False, drifted_features=int(rep.drifted.sum()),
-                         max_psi=rep.psi.max(), top_feature=rep.sort_values("psi").feature.iloc[-1],
-                         domain_auc=auc, detected=flagged))
+        row = dict(scenario=name, injected=name.startswith("control") is False, drifted_features=int(rep.drifted.sum()),
+                   max_psi=rep.psi.max(), top_feature=rep.sort_values("psi").feature.iloc[-1],
+                   domain_auc=auc, detected=flagged)
+        row.update(_evidently_row(ref, cur, evidently_dir, name, flagged))
+        rows.append(row)
         detail.append(rep.assign(scenario=name))
     df = pd.DataFrame(rows)
     inj = df[df.injected]
     report = ("# Stage 10 - Drift detection (PSI + KS against the training reference)\n\n"
               f"Detected {int(inj.detected.sum())}/{len(inj)} injected drifts; "
               f"false alarm on control: {bool(df[~df.injected].detected.iloc[0])}.\n\n"
-              + df.round(3).to_markdown(index=False) + "\n\nRule: drift when any monitored feature has PSI > 0.2 (univariate) OR a domain classifier separates live from training traffic with ROC-AUC > 0.6 (multivariate; catches mixture shifts that move each feature only slightly).\n")
+              + df.round(3).to_markdown(index=False)
+              + "\n\nRule: drift when any monitored feature has PSI > 0.2 (univariate) OR a domain classifier separates live from training traffic with ROC-AUC > 0.6 (multivariate; catches mixture shifts that move each feature only slightly).\n"
+              + _evidently_footer(df, evidently_dir))
     (config.REPORTS / "stage10_drift.md").write_text(report, encoding="utf-8")
     pd.concat(detail).to_csv(config.REPORTS / "stage10_drift_detail.csv", index=False)
     print(report)
@@ -213,15 +285,18 @@ def real_data_drift_experiment(seed: int = 1000):
         "dwell/time-gaps x3 (duration_s, mean_gap_s scaled)": dwell_cur,
         f"category mix shift (4x weight on top category '{top_cat}')": _weighted_resample(test, cat_w, n, rng),
     }
+    evidently_dir = config.REPORTS / "evidently"
     rows, detail = [], []
     for name, cur in scenarios.items():
         injected = not name.startswith("control")
         rep = drift_report(ref, cur)
         auc = domain_classifier_auc(ref, cur)
         flagged = bool(rep.drifted.any()) or auc > 0.6
-        rows.append(dict(scenario=name, injected=injected, drifted_features=int(rep.drifted.sum()),
-                         max_psi=rep.psi.max(), top_feature=rep.sort_values("psi").feature.iloc[-1],
-                         domain_auc=auc, detected=flagged))
+        row = dict(scenario=name, injected=injected, drifted_features=int(rep.drifted.sum()),
+                   max_psi=rep.psi.max(), top_feature=rep.sort_values("psi").feature.iloc[-1],
+                   domain_auc=auc, detected=flagged)
+        row.update(_evidently_row(ref, cur, evidently_dir, name, flagged))
+        rows.append(row)
         detail.append(rep.assign(scenario=name))
     df = pd.DataFrame(rows)
     inj = df[df.injected]
@@ -236,6 +311,7 @@ def real_data_drift_experiment(seed: int = 1000):
         + "\n\nRule: drift when any monitored feature has PSI > 0.2 (univariate) OR a domain "
           "classifier separates live from training traffic with ROC-AUC > 0.6 (multivariate; "
           "catches mixture shifts that move each feature only slightly).\n"
+        + _evidently_footer(df, evidently_dir)
     )
     (config.REPORTS / "stage10_drift.md").write_text(report, encoding="utf-8")
     pd.concat(detail).to_csv(config.REPORTS / "stage10_drift_detail.csv", index=False)

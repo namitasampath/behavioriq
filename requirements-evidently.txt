@@ -1,0 +1,14 @@
+# Isolated environment for Evidently AI drift reports (Upgrade 7).
+#
+# Evidently 0.7.23 (the latest release as of 2026-11) is incompatible with pandas 3.x: it still
+# calls an internal pandas API (`pandas.core.dtypes.common.infer_dtype_from_object`) that pandas
+# removed in the 3.x line. The main project venv runs pandas 3.1.0, so Evidently cannot be
+# installed there without downgrading a core shared dependency used by every pipeline stage.
+#
+# Instead this is a SEPARATE venv (`uv venv --python 3.11 .venv-evidently`, then
+# `uv pip install -r requirements-evidently.txt --python .venv-evidently/Scripts/python.exe`),
+# used only by biq/evidently_reports.py, invoked as a subprocess from biq/mlops.py. The main venv,
+# requirements.txt, and pandas are never touched.
+evidently==0.7.23
+pandas>=2.0,<3
+pyarrow

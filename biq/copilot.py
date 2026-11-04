@@ -10,11 +10,19 @@ Guardrails:
   * grounding check: every number in the answer must appear in (or round from) a tool result,
     otherwise the answer is regenerated once and then refused
 
-With ANTHROPIC_API_KEY set it uses Claude tool use (model from BIQ_LLM_MODEL). Without a key it
-falls back to a small rule-based router so the demo still runs (clearly labelled "offline mode").
+Provider selection (BIQ_LLM_PROVIDER, default "anthropic"):
+  anthropic (default) - Claude tool use (model from BIQ_LLM_MODEL), needs ANTHROPIC_API_KEY.
+  ollama              - a local Ollama server's OpenAI-compatible endpoint (BIQ_OLLAMA_URL, default
+                        http://localhost:11434/v1), model from BIQ_LLM_MODEL (default qwen2.5:3b).
+                        Free, local, no API key. Same TOOLS, same guardrails, grounding check and
+                        regenerate-once logic as the Anthropic path - only the wire format differs.
+Without a usable LLM (no ANTHROPIC_API_KEY, provider "anthropic") it falls back to a small
+rule-based router so the demo still runs (clearly labelled "offline mode"). If BIQ_LLM_PROVIDER=ollama
+but the server/model is unreachable, it also falls back to offline mode rather than crashing.
 
     python -m biq.copilot "Which segment has the highest abandonment rate?"
     python -m biq.copilot --eval
+    BIQ_LLM_PROVIDER=ollama python -m biq.copilot --eval
 """
 from __future__ import annotations
 
@@ -139,6 +147,30 @@ TOOLS = [
 ]
 IMPL = {"describe_schema": describe_schema, "run_sql": run_sql, "find_similar_sessions": find_similar_sessions}
 
+# OpenAI-style tool-calling schema (same tools/guardrails, different wire format) - used by ask_ollama
+OPENAI_TOOLS = [{"type": "function", "function": {"name": t["name"], "description": t["description"],
+                                                    "parameters": t["input_schema"]}} for t in TOOLS]
+
+
+def _ollama_system_prompt() -> str:
+    """SYSTEM plus the describe_schema() output inlined, and one worked run_sql example - small
+    local models tend to guess view/column names instead of calling describe_schema first, so this
+    puts the schema in front of them without an extra tool round trip. Ollama-only; the Anthropic
+    path's SYSTEM is unchanged."""
+    schema = describe_schema()
+    lines = [f"- {v}: {schema[v]['description']}\n  columns: " +
+             ", ".join(f"{c} ({t})" for c, t in schema[v]["columns"]) for v in VIEWS]
+    schema_block = "\n".join(lines)
+    example = (
+        "Worked example (illustrative only, not one of your actual questions): to answer "
+        '"Break down sessions by outcome, with session counts and average events per outcome", '
+        "call run_sql with exactly:\n"
+        "SELECT outcome, session_count, avg_events FROM v_outcome_summary ORDER BY outcome\n"
+        'This might return rows like {"outcome": "purchase", "session_count": 1570, "avg_events": 14.2}. '
+        "Always use the exact view and column names listed above - never guess a column name."
+    )
+    return f"{SYSTEM}\n\nSchema (the whitelisted views and their columns):\n{schema_block}\n\n{example}"
+
 
 # ---------------------------------------------------------------- grounding
 NUM = re.compile(r"(?<![\w.])-?\d+(?:,\d{3})*(?:\.\d+)?%?")
@@ -197,6 +229,45 @@ def ask_llm(question: str, max_tool_calls: int = 6) -> dict:
         if ok:
             return {"answer": answer, "grounded": True, "sql": sqls, "tool_outputs": outputs, "mode": config.LLM_MODEL}
         msgs.append({"role": "assistant", "content": resp.content})
+        msgs.append({"role": "user", "content": f"These numbers are not in any tool result: {bad}. "
+                                                 "Rewrite the answer using only figures from tool results."})
+    return {"answer": "I can't answer that reliably from the data available.", "grounded": False,
+            "unfounded": bad, "sql": sqls, "tool_outputs": outputs, "mode": config.LLM_MODEL}
+
+
+def ask_ollama(question: str, max_tool_calls: int = 6) -> dict:
+    """Same tools/guardrails/grounding/regenerate-once logic as ask_llm, but against a local Ollama
+    server through its OpenAI-compatible /v1 endpoint instead of the Anthropic API."""
+    import openai
+    client = openai.OpenAI(base_url=config.OLLAMA_BASE_URL, api_key="ollama", timeout=120)
+    msgs = [{"role": "system", "content": _ollama_system_prompt()}, {"role": "user", "content": question}]
+    outputs, sqls = [], []
+    for attempt in range(2):
+        calls = 0
+        while True:
+            resp = client.chat.completions.create(model=config.LLM_MODEL, messages=msgs, tools=OPENAI_TOOLS,
+                                                    temperature=0)
+            msg = resp.choices[0].message
+            if not msg.tool_calls or calls >= max_tool_calls:
+                break
+            msgs.append({"role": "assistant", "content": msg.content,
+                         "tool_calls": [tc.model_dump() for tc in msg.tool_calls]})
+            for tc in msg.tool_calls:
+                calls += 1
+                try:
+                    args = json.loads(tc.function.arguments or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                out = IMPL[tc.function.name](**args)
+                outputs.append(out)
+                if tc.function.name == "run_sql":
+                    sqls.append(out.get("sql", args.get("query")))
+                msgs.append({"role": "tool", "tool_call_id": tc.id, "content": json.dumps(out, default=str)[:12000]})
+        answer = (msg.content or "").strip()
+        ok, bad = grounded(answer, outputs)
+        if ok:
+            return {"answer": answer, "grounded": True, "sql": sqls, "tool_outputs": outputs, "mode": config.LLM_MODEL}
+        msgs.append({"role": "assistant", "content": msg.content})
         msgs.append({"role": "user", "content": f"These numbers are not in any tool result: {bad}. "
                                                  "Rewrite the answer using only figures from tool results."})
     return {"answer": "I can't answer that reliably from the data available.", "grounded": False,
@@ -272,6 +343,11 @@ def ask_offline(question: str) -> dict:
 
 
 def ask(question: str) -> dict:
+    if config.LLM_PROVIDER == "ollama":
+        try:
+            return ask_ollama(question)
+        except Exception as e:  # server down / model missing -> still answer
+            r = ask_offline(question); r["mode"] = f"offline (LLM error: {type(e).__name__})"; return r
     if os.getenv("ANTHROPIC_API_KEY"):
         try:
             return ask_llm(question)
@@ -301,7 +377,7 @@ EVAL = [  # (question, gold SQL, gold value column, how to pick)
 ]
 
 
-def evaluate():
+def evaluate(out_name: str | None = None):
     rows = []
     con = connect(read_only=True)
     for q, gold_sql in EVAL:
@@ -328,7 +404,8 @@ def evaluate():
               "guardrails and grounding check work - it is NOT evidence of LLM accuracy. Set ANTHROPIC_API_KEY and rerun "
               "`python -m biq.copilot --eval` for the real Stage 9 result.\n\n" if df["mode"].iloc[0] == "offline" else "")
            + df.to_markdown(index=False) + "\n")
-    (config.REPORTS / "stage9_copilot.md").write_text(rep, encoding="utf-8")
+    name = out_name or ("stage9_copilot_ollama.md" if config.LLM_PROVIDER == "ollama" else "stage9_copilot.md")
+    (config.REPORTS / name).write_text(rep, encoding="utf-8")
     print(rep)
 
 

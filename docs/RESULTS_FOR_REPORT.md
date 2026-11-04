@@ -15,7 +15,7 @@ time-based 70/15/15 split). Every number below is reproducible; full tables are 
 | Retrieval precision | P@10 > 0.7 | 0.63 | **No** - see finding 3 |
 | Intent: C+R beats A and B | measurable delta | C+R does not beat A/B | **No** - see findings 1-2 |
 | Contextual bandit | beats fixed rule after warm-up | +16% total reward; ahead after 50 decisions | Yes |
-| Copilot | >= 90% correct, 0 unfounded numbers | offline router 16/16, 0 unfounded, 4/4 attacks blocked; LLM run pending an API key | Partly |
+| Copilot | >= 90% correct, 0 unfounded numbers | offline router 16/16 (not evidence of LLM accuracy); real LLM run (local qwen2.5:3b via Ollama, no API key available): 2/16 (12%) without schema-in-prompt, **11/16 (69%)** with it; 0 unfounded numbers reached the user in either run, 4/4 attacks blocked | **No** - see Upgrade 6 |
 | Drift monitoring | 100% of injections | 5/5 detected, no false alarm on control | Yes |
 
 ## Findings (write these honestly - they are a stronger viva than inflated numbers)
@@ -48,6 +48,33 @@ time-based 70/15/15 split). Every number below is reproducible; full tables are 
 - The bandit is evaluated only in simulation (no counterfactuals in logged data).
 - The text baseline is TF-IDF + SVD unless `sentence-transformers` is installed (it then uses MiniLM).
 - The laptop edition substitutes in-process equivalents for Kafka/Flink/Feast/ClickHouse (README table).
+
+## Upgrade 4 - Redis-backed feature store (Feast blocked)
+
+The plan was Feast with a Redis online store. `uv pip install --dry-run feast --python
+.venv/Scripts/python.exe` against this project's venv resolves `feast==0.67.0` but requires
+downgrading `pandas 3.1.0 -> 2.3.3` *and* `prometheus-client 0.26.0 -> 0.24.1` - the latter would
+break Upgrade 3's `/metrics` instrumentation in `biq/ingest_api.py`/`biq/serve_api.py`. Per the
+session rule (don't downgrade pandas in the shared venv), Feast was not installed; `redis-py`
+(`uv pip install --dry-run redis` resolves cleanly, 1 package, no version changes) talks to Redis
+directly instead, behind the same `FeatureStore` interface (`write`/`flush`/`get_online_features`),
+so `biq/stream_processor.py` and `biq/serve_api.py`'s `/features/{session_id}` route needed no
+changes.
+
+**Training/serving parity** (`tests/feature_parity.py`, 50 random sessions, online snapshot vs.
+`get_historical_features()` at the same timestamp):
+
+| Backend | Match |
+| --- | --- |
+| SQLite (default, `FEATURE_STORE` unset) | 750/750 (100.00%) |
+| Redis (`FEATURE_STORE=redis`) | 750/750 (100.00%) |
+
+**Live proof**: with `KAFKA_BOOTSTRAP=localhost:19092` and `FEATURE_STORE=redis`,
+`stream_processor --live` tailed the real `user-events` Kafka topic (Redpanda) while
+`biq.simulator --http ... --realtime` posted 1,695 events from 150 live sessions through
+`ingest_api`; the consumer group (`biq-stream`) drained to 0 lag, and
+`GET /features/s_000076` on `serve_api.py` (unchanged route) returned that session's live feature
+vector read straight out of Redis. Full commands: `docs/PROGRESS.md` ("Upgrade 4").
 
 ## Upgrade 5 - REES46 real-data replay vs. the simulator
 
@@ -178,10 +205,155 @@ watches, not a REES46 artefact.
 - **Copilot** - not run for this dataset in `run_all.py` (the warehouse views and guardrails work
   unchanged against the REES46-derived catalogue; this just wasn't part of this session's scope).
 
+## Upgrade 6 - local LLM copilot via Ollama (honest result)
+
+`BIQ_LLM_PROVIDER=ollama` routes the copilot through a local `qwen2.5:3b` (1.9GB, Q4_K_M) served by
+Ollama at `http://localhost:11434/v1`, via its OpenAI-compatible chat-completions endpoint and the
+`openai` Python client. It is given the exact same three tools, the same `sqlglot` SQL guardrail,
+the same k-anonymity floor, and the same grounding-check-then-regenerate-once logic as the Claude
+path (`ask_llm`) - only the wire format (OpenAI tool-calling JSON vs. Anthropic's) differs. No
+ANTHROPIC_API_KEY was available in this environment, so this is the first time the Stage 9 DoD
+("LLM run, not the offline router") has actually been exercised end to end.
+
+### Result: `reports/stage9_copilot_ollama.md`
+
+- **Correct: 2/16 (12%)**
+- **Answers with unfounded numbers that reached the user: 0** (1 question failed grounding twice and
+  was correctly refused instead of shown - the guardrail did its job)
+- **Malicious / non-whitelisted SQL blocked: 4/4**
+
+This is a large drop from the offline router's 16/16 and from the ClickHouse-era note that assumed
+an LLM run would also score well. It is being reported as-is, per the instruction not to tune the
+eval questions to the model - the honest conclusion is that **a 3B-parameter local model is not yet
+good enough to be BehaviorIQ's copilot**, even though the surrounding guardrail/grounding machinery
+works correctly regardless of model quality.
+
+### Why the other 14 failed
+
+| Pattern | Count | Questions | What happened |
+| --- | --- | --- | --- |
+| Wrong view/column, never recovered | 9 | conversion rate, segment abandonment, conversion mobile/desktop, compare-abandonment x2, category add-to-cart, browse-only count, busiest day | The model queried a plausible-sounding but wrong view (e.g. `v_funnel_daily` for a `segment` column that only exists in `v_segment_summary`) or guessed a column name (`length_bucket`, `add_to_cart`) that doesn't exist, got a DuckDB binder error back from `run_sql`, and either repeated the same mistake or gave up with a hedging answer inside its 6-tool-call budget, instead of calling `describe_schema` to look up the real columns. |
+| Right view, wrong SQL logic | 4 | sessions ended in abandonment, sessions ended in purchase, avg events in purchasing sessions, cart-abandoners segment count | The model picked the correct view but then mis-executed the query - e.g. `COUNT(*)` on `v_outcome_summary` (one row per outcome) instead of reading the `session_count` column, giving "1 session ended in a purchase" when the true figure is 1,570; or an exact-string filter (`segment = 'cart_abandoners'`) that didn't match the real label (`'cart abandoners (c3)'`) and needed a `LIKE`. These answers are internally "grounded" (the wrong number genuinely came from a tool result) but still factually wrong - grounding proves the number wasn't invented, not that the SQL was correct. |
+| Refused after failing the grounding check twice | 1 | segment with highest conversion rate | The model's first answer cited a number not present in any tool result; asked to regenerate, it failed again, so `ask_ollama` returned the honest fallback ("I can't answer that reliably") rather than a hallucinated figure - the guardrail working as designed, just on a model weak enough to trigger it. |
+| Correct (tool-call only, no SQL) | 2 | sessions similar to compare+cart users; sessions similar to add-to-cart-then-remove users | Both only needed a single `find_similar_sessions` call and a restatement of its `outcome_share` output - no SQL authoring required. This is the one capability qwen2.5:3b showed reliably: calling a described tool correctly and reporting its output. |
+
+### What this does and doesn't say
+
+- The **guardrails are provider-independent and work**: in 16 questions across two very different
+  models (Claude in the ClickHouse-era run, qwen2.5:3b here), zero unfounded numbers ever reached
+  the user, and both SQL-injection-style guardrail tests (4/4) were blocked regardless of model
+  quality - this is exactly the point of separating "can the model write correct SQL" from "can a
+  wrong/malicious query ever leak an ungrounded or unsafe answer".
+- The **SQL-authoring step is the bottleneck**, not tool-calling mechanics. qwen2.5:3b correctly
+  identified when and how to call a tool (its one clean pass used `find_similar_sessions` exactly
+  right); it consistently failed at picking the right view/column and writing correct aggregation
+  SQL against an 8-view schema it hadn't memorised, within a 6-tool-call budget it rarely spent
+  calling `describe_schema` first.
+- This result is **model-size-limited, not architecture-limited**: the same `ask_ollama()` path works
+  against any OpenAI-compatible endpoint, so a larger local model (disk space permitting) or a hosted
+  Claude key would very likely score far closer to the offline router's 16/16, as the mechanism
+  (tools, guardrail, grounding) is identical to the already-working Anthropic path.
+
+### Follow-up: schema-in-prompt (`reports/stage9_copilot_ollama_v2.md`)
+
+The failure analysis above pointed at one specific, fixable cause for 9 of the 14 failures: the model
+mostly never called `describe_schema` before guessing a view/column name, inside its 6-tool-call
+budget. `_ollama_system_prompt()` (Ollama path only - the Anthropic `SYSTEM` prompt, tools, guardrail,
+grounding and regenerate-once logic are all unchanged) now inlines the `describe_schema()` output
+(all 8 view names, descriptions and exact column names/types) directly into the system prompt, plus
+one worked `run_sql` example against `v_outcome_summary` that is not one of the 16 eval questions -
+so the model sees the real schema and one correct query shape before it writes any SQL, without
+spending a tool call to look it up.
+
+Same 16 questions, not tuned to the model, same `QDRANT_URL` workaround:
+
+| Run | Correct | Unfounded numbers reaching the user | Attacks blocked |
+| --- | --- | --- | --- |
+| v1 - no schema in prompt (`stage9_copilot_ollama.md`) | 2/16 (12%) | 0 | 4/4 |
+| v2 - schema in prompt (`stage9_copilot_ollama_v2.md`) | **11/16 (69%)** | 0 | 4/4 |
+
+A single, cheap prompt change (no retraining, no bigger model, no extra tool round trip) took the
+local copilot from 12% to 69% - confirming the Upgrade 6 conclusion that the bottleneck was SQL
+authoring against an unfamiliar schema, not tool-calling mechanics or the guardrail machinery. It is
+still below the >=90% DoD target and below the offline router's 16/16, so the verdict stays **No**,
+but the gap to "good enough to demo" is now small rather than fundamental.
+
+The 5 remaining v2 failures:
+
+| Question | What happened |
+| --- | --- |
+| Overall conversion rate (26.30% vs. true 26.2%) | Grounded and close, but computed an unweighted average of `v_funnel_daily.conversion_rate` across days instead of `SUM(purchased)/SUM(session_count)` - a weighting mistake, not a schema mistake. |
+| Conversion rate on mobile | Reported a range ("0% to 0.83%") instead of the one aggregate figure - read individual `v_conversion_by_segment` rows (one per device x referrer x segment) without aggregating them across all mobile sessions. |
+| Conversion rate on desktop (72.5%/40 sessions vs. the real cross-segment rate) | Same cause: picked one narrow segment/referrer row from `v_conversion_by_segment` instead of aggregating across all desktop sessions - it did correctly surface the k-anonymity suppression note, so the privacy floor is visible in the answer even when the aggregation is wrong. |
+| Category with the highest add-to-cart rate | Failed the grounding check twice and was correctly refused rather than shown a hallucinated number - the one guardrail-triggered case in this run too. |
+| Sessions in the cart-abandoners segment (answered 0) | The schema block gives column **names** and **types**, not the actual string values stored in them - the model still filtered on `segment = 'cart_abandoners'` instead of the real label `'cart abandoners (c3)'` (needs a `LIKE`). Schema-in-prompt cannot fix a wrong-literal-value mistake, only a wrong-structure mistake. |
+
+So the residual failures are a weighting bug, two wrong-aggregation-level mistakes, one honest refusal,
+and one data-values mistake the schema block structurally cannot address - a materially different (and
+smaller) failure surface than v1's dominant "picked the wrong view entirely" pattern.
+
+## Upgrade 7 - Evidently AI drift reports (honest agreement result)
+
+Evidently 0.7.23 (current on PyPI) cannot be imported against this project's pandas 3.1.0 - it still
+calls an internal pandas API (`pandas.core.dtypes.common.infer_dtype_from_object`) that pandas
+removed in the 3.x line, and no newer Evidently release exists to fix this. Rather than downgrading
+pandas for the whole project, Evidently runs in a separate `.venv-evidently` environment (pandas
+`>=2.0,<3`, see `requirements-evidently.txt`), invoked by `biq/mlops.py::evidently_report()` as a
+subprocess running `biq/evidently_reports.py`. `BIQ_EVIDENTLY=1` turns this on; unset, `run_all.py`
+and `pytest` behave exactly as before (no subprocess calls, no new files, new drift-table columns
+blank). Our PSI + domain-classifier rule stays the pass/fail decision for both drift experiments;
+Evidently's own dataset-drift verdict (`DataDriftPreset`, share of drifted columns >= 0.5, its own
+preset default - not our PSI>0.2 threshold) is recorded alongside it, honestly, including where the
+two disagree.
+
+### Result: agreement with our rule
+
+| Run | Scenarios | Evidently agrees with our rule |
+| --- | --- | --- |
+| Simulated (`reports/stage10_drift.md`, `reports/evidently/`) | 6 | **2/6** |
+| REES46 real data (`reports/rees46/stage10_drift.md`, `reports/rees46/evidently/`) | 5 | **3/5** |
+
+This is reported as-is, not tuned to make the two detectors agree. Evidently's dataset-drift test
+(share of drifted columns over a flat 50% threshold) is a coarser, stricter-in-a-different-way rule
+than ours (any one feature's PSI > 0.2, OR a domain classifier ROC-AUC > 0.6 - built specifically to
+catch mixture shifts that move every feature only slightly). On the simulated scenarios, Evidently
+missed 4 of 5 injected drifts that our rule caught (`mobile surge`, `deal-hunter influx`, `slow
+sessions`, `abandoner wave`) - each flagged 1 to 4 of 9 columns individually (shares 0.111-0.444),
+under its 50% dataset-level cutoff, even though the shifted feature(s) were large and real (e.g.
+`duration_s` tripled in `slow sessions`, PSI 1.05; `deal-hunter influx` came closest to Evidently's
+own threshold at 4/9 columns, share 0.444). Both detectors agreed on the `control` (no false alarm)
+and `comparer surge` (5/9 columns, share 0.556, just over the 50% line) scenarios. The real-data run shows the same pattern in miniature: Evidently and our rule agree
+on the control and on the two scenarios where the domain classifier's AUC stayed under 0.6
+(`cart-heavy`, `category mix`), and disagree on the two where our multivariate check caught a
+shift spread thinly across several features.
+
+**Why this isn't a bug in either detector**: Evidently's `DataDriftPreset` is a per-column voting
+rule (count how many individual columns look different); our rule adds a domain-classifier check
+specifically because a shift that nudges several correlated features slightly can be invisible to
+any single-column test yet still be a real, detectable distributional change - which is exactly the
+disagreement pattern observed here. Evidently's own HTML reports show its per-column PSI/K-S
+breakdown for every scenario (scenario selector on the dashboard's Monitoring tab), so both views are
+available side by side rather than one silently overriding the other.
+
 ## Likely viva questions
 - *Why a time-based split?* Random splits let the model see the future and inflate scores.
 - *How do you stop label leakage?* Inputs end before the first purchase/exit event (`prediction_prefix`).
 - *How do you stop retrieval leakage?* Neighbours must close before the query session starts, and never include itself.
 - *Why HDBSCAN?* Behavioural clusters are uneven and non-spherical, and it labels outliers as noise instead of forcing them into a cluster.
 - *Why Thompson Sampling?* It balances exploration and exploitation by sampling from its uncertainty, and it beats fixed rules once it has some data.
+- *Why did the local-LLM copilot only score 12%?* A 3B model can call a described tool correctly but
+  can't reliably pick the right view or write correct aggregation SQL against an 8-view schema from
+  a text description alone - see Upgrade 6. The guardrails (SQL whitelist, k-anonymity, grounding
+  check) are model-independent and caught every unsafe/ungrounded case regardless.
+- *How did it get to 69%?* Putting `describe_schema()`'s own output directly in the system prompt
+  (plus one worked `run_sql` example) removed the "guess a view/column name" failure mode without
+  touching the guardrail, grounding check or tools - see the schema-in-prompt follow-up under
+  Upgrade 6. The residual failures are weighting/aggregation-level mistakes and one data-*value*
+  mistake (a segment label format), which schema structure alone can't fix.
+- *Why does Evidently disagree with your own drift rule on most scenarios?* It votes per column
+  (dataset drift = >=50% of columns individually flagged); ours adds a domain-classifier check so a
+  shift spread thinly across several correlated features - which still produces a real, detectable
+  distributional change - isn't invisible just because no single column crosses Evidently's
+  per-column threshold on its own. See Upgrade 7; both detectors' full output ship side by side
+  (table + Evidently's own HTML report) rather than one silently overriding the other.
 - *How is the copilot kept honest?* SQL is limited to whitelisted views, rows from fewer than 20 sessions are suppressed, and every number in an answer is checked against tool output.

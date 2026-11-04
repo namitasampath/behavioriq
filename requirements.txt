@@ -16,10 +16,12 @@ streamlit
 plotly
 sqlglot
 anthropic
+openai
 mlflow
 clickhouse-connect
 psycopg2-binary
 prometheus-client
+redis
 scipy
 matplotlib
 torch

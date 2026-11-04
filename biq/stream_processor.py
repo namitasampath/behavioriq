@@ -163,14 +163,18 @@ def live():
     store = FeatureStore()
     proc = SessionProcessor(store)
     n = 0
-    print("listening on the event bus... (Ctrl+C to stop)")
+    print("listening on the event bus... (Ctrl+C to stop)", flush=True)
     try:
         for ev in consume(follow=True, from_start=False):
+            n_closed_before = len(proc.closed)
             proc.on_event(ev)
             n += 1
+            for closed in proc.closed[n_closed_before:]:
+                print(f"session closed: {closed['session_id']} outcome={closed['outcome']} "
+                      f"reason={closed['close_reason']} events={closed['n_events']}", flush=True)
             if n % 50 == 0:
                 store.flush()
-                print(f"{n} events, {len(proc.state)} open sessions, {len(proc.closed)} closed")
+                print(f"{n} events, {len(proc.state)} open sessions, {len(proc.closed)} closed", flush=True)
     except KeyboardInterrupt:
         store.flush()
 
